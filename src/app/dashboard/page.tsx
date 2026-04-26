@@ -3,7 +3,7 @@ import { UploadForm } from "./upload-form";
 import Link from "next/link";
 
 export default async function DashboardPage() {
-  const cycles = await prisma.cycle.findMany({
+  const ingestions = await (prisma as any).ingestion.findMany({
     orderBy: { createdAt: "desc" },
     include: {
       _count: {
@@ -12,69 +12,129 @@ export default async function DashboardPage() {
     }
   });
 
-  return (
-    <div className="flex flex-col gap-8">
-      <div className="flex justify-between items-center mt-8">
-        <div>
-          <h1 className="mb-2">Active Shipments (Cycles)</h1>
-          <p className="text-secondary">Manage your B2B inventory flow from CP-1 to CP-5.</p>
-        </div>
-        <div>
-          <UploadForm />
-        </div>
-      </div>
+  const cycles = await prisma.cycle.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      _count: {
+        select: { boxes: true }
+      }
+    }
+  } as any);
 
-      <div className="card">
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Date</th>
-                <th>Boxes</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cycles.length === 0 ? (
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '3rem', marginTop: '2rem' }}>
+      {/* Starting Points Section */}
+      <section style={{ padding: '0 0.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <div>
+            <h1 style={{ marginBottom: '0.5rem', fontSize: '1.875rem' }}>1. Starting Points (Ingestions)</h1>
+            <p className="text-secondary">Upload your CP-1 ingestion files here to populate the inventory pool.</p>
+          </div>
+          <div>
+            <UploadForm />
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: '1.5rem' }}>
+          <div className="table-container" style={{ border: 'none' }}>
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={6} className="text-center" style={{ padding: '2rem' }}>
-                    No shipments found. Upload an Excel file to get started.
-                  </td>
+                  <th>Batch ID</th>
+                  <th>Source Name</th>
+                  <th>Date Uploaded</th>
+                  <th className="text-center">Total Boxes</th>
                 </tr>
-              ) : (
-                cycles.map((cycle) => (
-                  <tr key={cycle.id}>
-                    <td className="text-sm text-secondary">{cycle.id.slice(-6)}</td>
-                    <td style={{ fontWeight: 500 }}>{cycle.name}</td>
-                    <td>{new Date(cycle.date).toLocaleDateString()}</td>
-                    <td>{cycle._count.boxes}</td>
-                    <td>
-                      <span style={{
-                        background: 'rgba(16, 185, 129, 0.1)',
-                        color: 'var(--accent-success)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: '4px',
-                        fontSize: '0.75rem',
-                        fontWeight: 600
-                      }}>
-                        {cycle.status}
-                      </span>
-                    </td>
-                    <td>
-                      <Link href={`/dashboard/cycle/${cycle.id}`} className="btn btn-secondary" style={{ padding: '0.5rem 1rem', fontSize: '0.875rem' }}>
-                        Manage Pricing
-                      </Link>
+              </thead>
+              <tbody>
+                {ingestions.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ textAlign: 'center', padding: '4rem 0' }} className="text-secondary italic">
+                      No ingestion batches found. Upload a file to start.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  ingestions.map((ing: any) => (
+                    <tr key={ing.id}>
+                      <td className="text-sm text-secondary font-mono">{ing.id.slice(-6)}</td>
+                      <td style={{ fontWeight: 500 }}>{ing.name}</td>
+                      <td>{new Date(ing.createdAt).toLocaleString()}</td>
+                      <td className="text-center">{ing._count.boxes}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      </section>
+
+      {/* Cycles Section */}
+      <section style={{ padding: '0 0.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <div>
+            <h1 style={{ marginBottom: '0.5rem', fontSize: '1.875rem' }}>2. Processing Cycles</h1>
+            <p className="text-secondary">Create a manual cycle to branch boxes into different pricing paths.</p>
+          </div>
+          <div>
+            <Link href="/dashboard/cycles/new" className="btn btn-primary" style={{ padding: '0.75rem 1.5rem' }}>
+              + Create New Cycle
+            </Link>
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: '1.5rem' }}>
+          <div className="table-container" style={{ border: 'none' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Cycle ID</th>
+                  <th>Internal Name</th>
+                  <th>Created Date</th>
+                  <th className="text-center">Assigned Boxes</th>
+                  <th>Status</th>
+                  <th className="text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cycles.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: '4rem 0' }} className="text-secondary italic">
+                      No active cycles. Click "Create New Cycle" to begin processing boxes.
+                    </td>
+                  </tr>
+                ) : (
+                  cycles.map((cycle: any) => (
+                    <tr key={cycle.id}>
+                      <td className="text-sm text-secondary font-mono">{cycle.id.slice(-6)}</td>
+                      <td style={{ fontWeight: 500 }}>{cycle.name}</td>
+                      <td>{new Date(cycle.createdAt).toLocaleDateString()}</td>
+                      <td className="text-center">{cycle._count.boxes}</td>
+                      <td>
+                        <span style={{
+                          background: 'rgba(16, 185, 129, 0.1)',
+                          color: 'var(--accent-success)',
+                          padding: '0.25rem 0.5rem',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          fontWeight: 600
+                        }}>
+                          {cycle.status}
+                        </span>
+                      </td>
+                      <td className="text-center">
+                        <Link href={`/dashboard/cycle/${cycle.id}`} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.875rem' }}>
+                          Manage Pipeline
+                        </Link>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

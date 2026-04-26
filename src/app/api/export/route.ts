@@ -29,18 +29,40 @@ export async function POST(req: Request) {
 
     // Recursive pricing logic to follow the "Sold As" model of previous stages
     const getHistoricalPrice = (item: any, targetStage: string): number => {
-      if (targetStage === "CP2") return item.cp1Price;
+      if (targetStage === "CP-1" || targetStage === "CP-2") return item.cp1Price;
 
-      if (targetStage === "CP3") {
-        const exportRecord = allExports.find(e => e.fromCompany === "CP2" && e.toCompany === "CP3");
+      // Find which box this item belongs to
+      const box = allBoxes.find(b => b.items.some(i => i.id === item.id));
+      if (!box) return item.cp1Price;
+
+      if (targetStage === "CP-3") {
+        const exportRecord = allExports.find(e => 
+          e.fromCompany === "CP-2" && 
+          e.toCompany === "CP-3" && 
+          e.invoiceBoxes.some((ib: any) => ib.boxId === box.id)
+        );
         if (!exportRecord) return item.cp1Price;
-        return calculatePriceForExport(item, "CP2", exportRecord);
+        return calculatePriceForExport(item, "CP-2", exportRecord);
       }
 
-      if (targetStage === "CP4") {
-        const exportRecord = allExports.find(e => e.fromCompany === "CP3" && e.toCompany === "CP4");
-        if (!exportRecord) return getHistoricalPrice(item, "CP3");
-        return calculatePriceForExport(item, "CP3", exportRecord);
+      if (targetStage === "CP-4") {
+        const exportRecord = allExports.find(e => 
+          e.fromCompany === "CP-3" && 
+          e.toCompany === "CP-4" && 
+          e.invoiceBoxes.some((ib: any) => ib.boxId === box.id)
+        );
+        if (!exportRecord) return getHistoricalPrice(item, "CP-3");
+        return calculatePriceForExport(item, "CP-3", exportRecord);
+      }
+
+      if (targetStage === "CP-5") {
+        const exportRecord = allExports.find(e => 
+          e.fromCompany === "CP-4" && 
+          e.toCompany === "CP-5" && 
+          e.invoiceBoxes.some((ib: any) => ib.boxId === box.id)
+        );
+        if (!exportRecord) return getHistoricalPrice(item, "CP-4");
+        return calculatePriceForExport(item, "CP-4", exportRecord);
       }
 
       return item.cp1Price;
@@ -59,7 +81,6 @@ export async function POST(req: Request) {
         return config.rowOverrides[key];
       }
 
-      // Find all items in this group in THAT stage to calculate the shared average base price
       const exportBoxIds = exportRecord.invoiceBoxes.map((ib: any) => ib.boxId);
       const groupItems = allBoxes
         .filter(b => exportBoxIds.includes(b.id))
@@ -86,28 +107,23 @@ export async function POST(req: Request) {
       });
 
       const avgBasePrice = totalPriceSum / totalQty;
-
       let price = (avgBasePrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
       
-      // STACKED Grade Markups for historical stages
       if (config.enableGradeMarkups && config.gradeMarkups) {
         const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
         let highestIndex = -1;
         gradesList.forEach((g, idx) => {
           if (gradesInGroup.has(g)) highestIndex = idx;
         });
-
         if (highestIndex !== -1) {
           for (let i = 0; i <= highestIndex; i++) {
             price += (config.gradeMarkups[gradesList[i]] || 0);
           }
         }
       }
-
       return Math.round(price);
     };
 
-    // 1. First Pass: Calculate groups and their grades for the CURRENT stage
     const currentBoxIds = boxIds;
     const groupData: Record<string, { qty: number, totalPriceSum: number, grades: Set<string> }> = {};
     
@@ -130,25 +146,20 @@ export async function POST(req: Request) {
       });
     });
 
-    // 2. Second Pass: Calculate the single "Stage Price" for each group
     const stagePrices: Record<string, number> = {};
     Object.entries(groupData).forEach(([key, data]) => {
       const avgBasePrice = data.totalPriceSum / data.qty;
-      
       let finalPrice = 0;
       if (rowOverrides && rowOverrides[key] !== undefined) {
         finalPrice = rowOverrides[key];
       } else {
         let priced = (avgBasePrice * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
-        
-        // STACKED Grade Markups for current stage
         if (enableGradeMarkups && gradeMarkups) {
           const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
           let highestIndex = -1;
           gradesList.forEach((g, idx) => {
             if (data.grades.has(g)) highestIndex = idx;
           });
-          
           if (highestIndex !== -1) {
             for (let i = 0; i <= highestIndex; i++) {
               priced += (gradeMarkups[gradesList[i]] || 0);
@@ -160,7 +171,6 @@ export async function POST(req: Request) {
       stagePrices[key] = finalPrice;
     });
 
-    // 3. Third Pass: Build raw CSV records
     const csvRecords: any[] = [];
     allBoxes.filter(b => currentBoxIds.includes(b.id)).forEach(box => {
       box.items.forEach(item => {

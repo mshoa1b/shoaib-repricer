@@ -1,12 +1,13 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { logout } from "../dashboard/actions";
 
 export function LogoutButton() {
   const router = useRouter();
 
-  const handleLogout = () => {
-    document.cookie = "auth=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
+  const handleLogout = async () => {
+    await logout();
     router.push("/login");
   };
 

@@ -26,7 +26,7 @@ export function UploadForm() {
 
   return (
     <div>
-      <label className="btn btn-primary" style={{ cursor: isUploading ? 'wait' : 'pointer' }}>
+      <label className="btn btn-primary" style={{ cursor: isUploading ? 'wait' : 'pointer', padding: '0.75rem 1.5rem' }}>
         {isUploading ? "Uploading..." : "Upload CP-1 Ingestion File (Excel)"}
         <input 
           type="file" 

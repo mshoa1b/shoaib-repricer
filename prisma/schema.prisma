@@ -13,6 +13,15 @@ model User {
   password String
 }
 
+model Ingestion {
+  id        String   @id @default(cuid())
+  name      String
+  date      DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  boxes     Box[]
+}
+
 model Cycle {
   id        String          @id @default(cuid())
   name      String
@@ -28,14 +37,16 @@ model Box {
   id           String       @id @default(cuid())
   wioName      String
   wioNumber    String
-  cycleId      String
+  ingestionId  String
+  cycleId      String?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
-  cycle        Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  ingestion    Ingestion    @relation(fields: [ingestionId], references: [id], onDelete: Cascade)
+  cycle        Cycle?       @relation(fields: [cycleId], references: [id], onDelete: SetNull)
   invoiceBoxes InvoiceBox[]
   items        Item[]
 
-  @@unique([wioNumber, cycleId])
+  @@unique([wioNumber, ingestionId])
 }
 
 model Item {
@@ -54,6 +65,7 @@ model Item {
 model InvoiceExport {
   id                String       @id @default(cuid())
   cycleId           String
+  branchName        String?
   fromCompany       String
   toCompany         String
   configurationMode String

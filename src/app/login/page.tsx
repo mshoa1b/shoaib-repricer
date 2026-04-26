@@ -2,21 +2,25 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { login } from "../dashboard/actions";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // For simplicity, hardcoded simple password as requested. 
-    // In production, use next-auth or a proper session.
-    if (password === "admin123") {
-      document.cookie = "auth=true; path=/";
+    setIsLoading(true);
+    setError("");
+
+    const result = await login(password);
+    if (result.success) {
       router.push("/dashboard");
     } else {
-      setError("Invalid password");
+      setError(result.error || "Login failed");
+      setIsLoading(false);
     }
   };
 

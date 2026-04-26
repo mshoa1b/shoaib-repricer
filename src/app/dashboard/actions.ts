@@ -1,6 +1,29 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+
+export async function login(password: string) {
+  const { cookies } = await import("next/headers");
+  const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+  if (password === adminPassword) {
+    const cookieStore = await cookies();
+    cookieStore.set("auth", "true", {
+      path: "/",
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 60 * 60 * 24 * 7 // 1 week
+    });
+    return { success: true };
+  }
+  return { success: false, error: "Invalid password" };
+}
+
+export async function logout() {
+  const { cookies } = await import("next/headers");
+  const cookieStore = await cookies();
+  cookieStore.delete("auth");
+}
 import * as xlsx from "xlsx";
 import { revalidatePath } from "next/cache";
 
@@ -22,18 +45,15 @@ export async function uploadIngestionFile(formData: FormData) {
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
   
-  // Convert sheet to JSON
   const data: any[] = xlsx.utils.sheet_to_json(sheet);
   
-  // Create a new cycle
-  const cycleName = `Shipment - ${new Date().toISOString().split("T")[0]}`;
-  const cycle = await prisma.cycle.create({
+  const ingestionName = `Batch - ${file.name} - ${new Date().toISOString().split("T")[0]}`;
+  const ingestion = await (prisma as any).ingestion.create({
     data: {
-      name: cycleName,
+      name: ingestionName,
     }
   });
 
-  // Group by WIO Number (Box)
   const boxesMap = new Map<string, { wioName: string, items: any[] }>();
 
   for (const row of data) {
@@ -55,14 +75,13 @@ export async function uploadIngestionFile(formData: FormData) {
     });
   }
 
-  // Save to DB
   for (const [wioNumber, boxData] of Array.from(boxesMap.entries())) {
     const box = await prisma.box.create({
       data: {
         wioNumber,
         wioName: boxData.wioName,
-        cycleId: cycle.id,
-      }
+        ingestionId: ingestion.id,
+      } as any
     });
 
     for (const item of boxData.items) {
@@ -80,6 +99,19 @@ export async function uploadIngestionFile(formData: FormData) {
   }
 
   revalidatePath("/dashboard");
+  return ingestion.id;
+}
+
+export async function createCycle(name: string, boxIds: string[]) {
+  const cycle = await prisma.cycle.create({
+    data: {
+      name,
+      boxes: {
+        connect: boxIds.map(id => ({ id }))
+      }
+    }
+  });
+  revalidatePath("/dashboard");
   return cycle.id;
 }
 
@@ -93,47 +125,62 @@ export async function renameCycle(id: string, newName: string) {
 }
 
 export async function saveStageConfiguration(data: {
+  id?: string,
   cycleId: string,
   fromCompany: string,
   toCompany: string,
   configurationMode: string,
   markupConfig: string,
-  boxIds: string[]
+  boxIds: string[],
+  branchName?: string
 }) {
-  const existing = await prisma.invoiceExport.findFirst({
-    where: {
-      cycleId: data.cycleId,
-      fromCompany: data.fromCompany,
-      toCompany: data.toCompany,
-    }
-  });
+  const recordId = data.id;
 
-  if (existing) {
+  if (recordId) {
     await prisma.invoiceExport.update({
-      where: { id: existing.id },
+      where: { id: recordId },
       data: {
+        branchName: data.branchName || null,
         configurationMode: data.configurationMode,
         markupConfig: data.markupConfig,
         invoiceBoxes: {
           deleteMany: {},
           create: data.boxIds.map(id => ({ boxId: id }))
         }
-      }
+      } as any
     });
-    return existing.id;
+    revalidatePath(`/dashboard/cycle/${data.cycleId}`);
+    return recordId;
   } else {
     const created = await prisma.invoiceExport.create({
       data: {
         cycleId: data.cycleId,
         fromCompany: data.fromCompany,
         toCompany: data.toCompany,
+        branchName: data.branchName || null,
         configurationMode: data.configurationMode,
         markupConfig: data.markupConfig,
         invoiceBoxes: {
           create: data.boxIds.map(id => ({ boxId: id }))
         }
-      }
+      } as any
     });
+    revalidatePath(`/dashboard/cycle/${data.cycleId}`);
     return created.id;
   }
+}
+export async function deleteCycle(id: string) {
+  await prisma.cycle.delete({
+    where: { id }
+  });
+  revalidatePath("/dashboard");
+  return { success: true };
+}
+
+export async function deleteBranch(id: string, cycleId: string) {
+  await prisma.invoiceExport.delete({
+    where: { id }
+  });
+  revalidatePath(`/dashboard/cycle/${cycleId}`);
+  return { success: true };
 }

@@ -3,11 +3,12 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { RenameCycleForm } from "./rename-form";
 import { MasterPriceGrid } from "./price-grid";
+import { BranchItem } from "./branch-item";
 
 const STAGES = [
-  { id: "cp2-cp3", from: "CP-2", to: "CP-3", desc: "Premium, A/G/B separate" },
-  { id: "cp3-cp4", from: "CP-3", to: "CP-4", desc: "Premium, A/G/B separate" },
-  { id: "cp4-cp5", from: "CP-4", to: "CP-5", desc: "Premium, A/G/B separate" },
+  { id: "cp2-cp3", from: "CP-2", to: "CP-3" },
+  { id: "cp3-cp4", from: "CP-3", to: "CP-4" },
+  { id: "cp4-cp5", from: "CP-4", to: "CP-5" },
 ];
 
 export default async function CycleDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -46,22 +47,36 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
     if (targetStage === "CP1") return item.cp1Price;
     if (targetStage === "CP2") return item.cp1Price;
 
+    const boxId = item.boxId;
+
     if (targetStage === "CP3") {
-      const exportRecord = allExports.find(e => e.fromCompany === "CP2" && e.toCompany === "CP3");
+      const exportRecord = allExports.find(e => 
+        e.fromCompany === "CP-2" && 
+        e.toCompany === "CP-3" && 
+        e.invoiceBoxes.some(ib => ib.boxId === boxId)
+      );
       if (!exportRecord) return item.cp1Price;
-      return calculatePriceForExport(item, "CP2", exportRecord);
+      return calculatePriceForExport(item, "CP-2", exportRecord);
     }
 
     if (targetStage === "CP4") {
-      const exportRecord = allExports.find(e => e.fromCompany === "CP3" && e.toCompany === "CP4");
+      const exportRecord = allExports.find(e => 
+        e.fromCompany === "CP-3" && 
+        e.toCompany === "CP-4" && 
+        e.invoiceBoxes.some(ib => ib.boxId === boxId)
+      );
       if (!exportRecord) return getHistoricalPrice(item, "CP3");
-      return calculatePriceForExport(item, "CP3", exportRecord);
+      return calculatePriceForExport(item, "CP-3", exportRecord);
     }
 
     if (targetStage === "CP5") {
-      const exportRecord = allExports.find(e => e.fromCompany === "CP4" && e.toCompany === "CP5");
+      const exportRecord = allExports.find(e => 
+        e.fromCompany === "CP-4" && 
+        e.toCompany === "CP-5" && 
+        e.invoiceBoxes.some(ib => ib.boxId === boxId)
+      );
       if (!exportRecord) return getHistoricalPrice(item, "CP4");
-      return calculatePriceForExport(item, "CP4", exportRecord);
+      return calculatePriceForExport(item, "CP-4", exportRecord);
     }
 
     return item.cp1Price;
@@ -139,19 +154,6 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
   const cp4Total = calculateStageTotal("CP4");
   const cp5Total = calculateStageTotal("CP5");
 
-  // Calculate pricing summary by Grade
-  const gradeSummary: Record<string, { count: number, totalQty: number, avgPrice: number }> = {};
-  cycle.boxes.forEach(box => {
-    box.items.forEach(item => {
-      if (!gradeSummary[item.grade]) {
-        gradeSummary[item.grade] = { count: 0, totalQty: 0, avgPrice: 0 };
-      }
-      gradeSummary[item.grade].count++;
-      gradeSummary[item.grade].totalQty += item.quantity;
-      gradeSummary[item.grade].avgPrice = ((gradeSummary[item.grade].avgPrice * (gradeSummary[item.grade].totalQty - item.quantity)) + (item.cp1Price * item.quantity)) / gradeSummary[item.grade].totalQty;
-    });
-  });
-
   const masterData = cycle.boxes.flatMap(box => 
     box.items.map(item => ({
       box: box.wioNumber,
@@ -166,17 +168,21 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
   );
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="mt-4">
-        <Link 
-          href="/dashboard" 
-          className="btn btn-secondary"
-          style={{ fontSize: '0.75rem', padding: '0.4rem 0.8rem', borderRadius: '6px', marginBottom: '2rem', display: 'inline-flex', gap: '0.5rem' }}
-        >
-          &larr; Back to Dashboard
-        </Link>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '3rem', marginTop: '1rem' }}>
+      <div style={{ padding: '0 0.5rem' }}>
+        <div style={{ marginBottom: '1.5rem' }}>
+          <Link 
+            href="/dashboard" 
+            className="btn btn-secondary"
+            style={{ fontSize: '0.75rem', padding: '0.4rem 0.8rem', borderRadius: '6px', display: 'inline-flex', gap: '0.5rem' }}
+          >
+            &larr; Back to Dashboard
+          </Link>
+        </div>
+        
         <RenameCycleForm id={cycle.id} initialName={cycle.name} />
-        <div className="flex gap-4">
+
+        <div style={{ display: 'flex', gap: '1rem', width: '100%' }}>
           <div className="card text-center" style={{ flex: 1, padding: '1rem', display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: '100px' }}>
             <div className="text-secondary text-xs uppercase tracking-wider mb-1">Boxes</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>{cycle.boxes.length}</div>
@@ -216,33 +222,56 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
         </div>
       </div>
 
-
-
-      <div className="card">
-        <h2 className="mb-4">Export Pipeline</h2>
-        <div className="flex flex-col gap-4">
+      <div className="card" style={{ padding: '1.5rem', margin: '0 0.5rem' }}>
+        <h2 style={{ fontSize: '1.5rem', marginBottom: '2rem' }}>Export Pipeline</h2>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '3rem' }}>
           {STAGES.map((stage) => {
-            const exp = cycle.exports.find(e => e.fromCompany === stage.from.replace('-','') && e.toCompany === stage.to.replace('-',''));
-            const modeLabel = exp?.configurationMode === "mixed" ? "Mixed Grades (Grouped)" :
-                             exp?.configurationMode === "separate" ? "All Separate (Individual SKUs)" :
-                             exp?.configurationMode === "premium-mixed" ? "Premium Separate / Others Mixed" :
-                             "Not configured yet";
+            const stageExports = cycle.exports.filter(e => e.fromCompany === stage.from && e.toCompany === stage.to);
 
             return (
-              <div key={stage.id} className="card" style={{ background: 'rgba(0,0,0,0.2)', padding: '1rem' }}>
-                <div className="flex justify-between items-center">
-                  <div>
-                    <div style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>
-                      {stage.from} &rarr; {stage.to}
-                    </div>
-                    <div className="text-secondary text-sm">{modeLabel}</div>
-                  </div>
-                  <div>
-                    <Link href={`/dashboard/cycle/${cycle.id}/stage/${stage.id}`} className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.875rem' }}>
-                      {exp ? "Edit Strategy" : "Configure"}
+              <div key={stage.id} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 0.25rem' }}>
+                  <h3 style={{ fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '0.15em', color: 'var(--text-secondary)', fontWeight: 800 }}>
+                    {stage.from} &rarr; {stage.to}
+                  </h3>
+                  <Link 
+                    href={`/dashboard/cycle/${cycle.id}/stage/${stage.id}/new`} 
+                    className="btn btn-secondary"
+                    style={{ padding: '0.4rem 1rem', fontSize: '0.75rem', borderRadius: '8px' }}
+                  >
+                    + Add Branch
+                  </Link>
+                </div>
+                
+                {stageExports.length === 0 ? (
+                  <div style={{ 
+                    background: 'rgba(255,255,255,0.01)', 
+                    border: '1px dashed var(--border-subtle)', 
+                    borderRadius: '16px',
+                    padding: '3rem', 
+                    textAlign: 'center' 
+                  }}>
+                    <p className="text-secondary" style={{ fontSize: '0.875rem', marginBottom: '1.5rem' }}>No pricing branches configured for this stage.</p>
+                    <Link 
+                      href={`/dashboard/cycle/${cycle.id}/stage/${stage.id}/new`} 
+                      className="btn btn-primary" 
+                      style={{ fontSize: '0.875rem', padding: '0.6rem 1.5rem' }}
+                    >
+                      Configure First Branch
                     </Link>
                   </div>
-                </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                    {stageExports.map(exp => (
+                      <BranchItem 
+                        key={exp.id} 
+                        exp={exp} 
+                        cycleId={cycle.id} 
+                        stageId={stage.id} 
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}

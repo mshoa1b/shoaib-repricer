@@ -23,38 +23,49 @@ export function StageConfigForm({
   cycleId,
   boxes,
   stageId,
+  branchId,
   initialData,
-  allExports = []
+  allExports = [],
+  fromCompany,
+  toCompany
 }: {
   cycleId: string,
   boxes: Box[],
   stageId: string,
+  branchId: string,
   initialData?: any,
-  allExports?: any[]
+  allExports?: any[],
+  fromCompany: string,
+  toCompany: string
 }) {
   const initialMarkupConfig = initialData?.markupConfig ? JSON.parse(initialData.markupConfig) : {};
 
+  const [branchName, setBranchName] = useState(initialData?.branchName || "");
   const [selectedBoxIds, setSelectedBoxIds] = useState<string[]>(
     initialData?.invoiceBoxes?.map((b: any) => b.boxId) || []
   );
   const [configMode, setConfigMode] = useState(initialData?.configurationMode || "mixed");
 
-  // Dual Markups
   const [percentageMarkup, setPercentageMarkup] = useState(initialMarkupConfig.percentageMarkup || 0);
   const [flatMarkup, setFlatMarkup] = useState(initialMarkupConfig.flatMarkup || 0);
 
-  // Grade Markups
   const [enableGradeMarkups, setEnableGradeMarkups] = useState(initialMarkupConfig.enableGradeMarkups || false);
   const [gradeMarkups, setGradeMarkups] = useState<Record<string, number>>(
     initialMarkupConfig.gradeMarkups || { "A Grade": 0, "B Grade": 0, "G Grade": 0, "Premium": 0 }
   );
-
   const [rowOverrides, setRowOverrides] = useState<Record<string, number>>(initialMarkupConfig.rowOverrides || {});
+  const [currentBranchId, setCurrentBranchId] = useState<string | null>(
+    branchId === 'new' ? null : branchId
+  );
+
   const [isSaving, setIsSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(
     initialData?.updatedAt ? new Date(initialData.updatedAt) : null
   );
   const [timeAgo, setTimeAgo] = useState<string>("");
+  const [search, setSearch] = useState("");
+  const [sortField, setSortField] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
 
   useEffect(() => {
     if (!lastSaved) return;
@@ -70,11 +81,6 @@ export function StageConfigForm({
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, [lastSaved]);
-  const [showToast, setShowToast] = useState(false);
-
-  const stageParts = stageId.split('-');
-  const fromCompany = stageParts[0].toUpperCase();
-  const toCompany = stageParts[1].toUpperCase();
 
   const isFirstMount = useRef(true);
 
@@ -86,12 +92,16 @@ export function StageConfigForm({
     }
 
     const saveData = async () => {
+      if (!branchName && !currentBranchId) return; // Don't auto-save a new branch without a name
+
       setIsSaving(true);
       try {
-        await saveStageConfiguration({
+        const savedId = await saveStageConfiguration({
+          id: currentBranchId || undefined,
           cycleId,
           fromCompany,
           toCompany,
+          branchName,
           configurationMode: configMode,
           markupConfig: JSON.stringify({ 
             percentageMarkup, 
@@ -103,6 +113,13 @@ export function StageConfigForm({
           boxIds: selectedBoxIds
         });
         setLastSaved(new Date());
+        
+        if (!currentBranchId) {
+          setCurrentBranchId(savedId);
+          // Update URL to reflect the new ID
+          const newPath = window.location.pathname.replace('/new', `/${savedId}`);
+          window.history.replaceState({}, '', newPath);
+        }
       } catch (err) {
         console.error("Auto-save failed:", err);
       } finally {
@@ -110,10 +127,10 @@ export function StageConfigForm({
       }
     };
 
-    // 1 second debounce
     const timer = setTimeout(saveData, 1000);
     return () => clearTimeout(timer);
   }, [
+    branchName,
     configMode, 
     percentageMarkup, 
     flatMarkup, 
@@ -121,26 +138,41 @@ export function StageConfigForm({
     gradeMarkups, 
     rowOverrides, 
     selectedBoxIds,
-    cycleId, fromCompany, toCompany
+    cycleId, fromCompany, toCompany, currentBranchId
   ]);
 
-  // Recursive pricing logic to follow the "Sold As" model of previous stages
-  const getHistoricalPrice = (item: Item, targetStage: string): number => {
-    // Stage 1: The Upload (CP1 -> CP2 transition is already done, so CP2 is our ground truth)
-    if (targetStage === "CP2") return item.cp1Price;
+  // Box Exclusivity Logic
+  const boxesTakenByOtherBranches = useMemo(() => {
+    return allExports
+      .filter(e => e.fromCompany === fromCompany && e.toCompany === toCompany && e.id !== branchId)
+      .flatMap(e => e.invoiceBoxes.map((ib: any) => ib.boxId));
+  }, [allExports, fromCompany, toCompany, branchId]);
 
-    // To get price at CP3, we look at the CP2 -> CP3 export
-    if (targetStage === "CP3") {
-      const exportRecord = allExports.find(e => e.fromCompany === "CP2" && e.toCompany === "CP3");
+  const availableBoxes = useMemo(() => {
+    return boxes
+      .filter(b => !boxesTakenByOtherBranches.includes(b.id))
+      .sort((a, b) => a.wioName.localeCompare(b.wioName));
+  }, [boxes, boxesTakenByOtherBranches]);
+
+  const getHistoricalPrice = (item: Item, targetStage: string): number => {
+    if (targetStage === "CP-2") return item.cp1Price;
+
+    const boxId = item.id; // Corrected to use item.id or find boxId
+
+    if (targetStage === "CP-3") {
+      const exportRecord = allExports.find(e => 
+        e.fromCompany === "CP-2" && e.toCompany === "CP-3" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxes.find(b => b.items.some(i => i.id === item.id))?.id)
+      );
       if (!exportRecord) return item.cp1Price;
-      return calculatePriceForExport(item, "CP2", exportRecord);
+      return calculatePriceForExport(item, "CP-2", exportRecord);
     }
 
-    // To get price at CP4, we look at the CP3 -> CP4 export
-    if (targetStage === "CP4") {
-      const exportRecord = allExports.find(e => e.fromCompany === "CP3" && e.toCompany === "CP4");
-      if (!exportRecord) return getHistoricalPrice(item, "CP3");
-      return calculatePriceForExport(item, "CP3", exportRecord);
+    if (targetStage === "CP-4") {
+      const exportRecord = allExports.find(e => 
+        e.fromCompany === "CP-3" && e.toCompany === "CP-4" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxes.find(b => b.items.some(i => i.id === item.id))?.id)
+      );
+      if (!exportRecord) return getHistoricalPrice(item, "CP-3");
+      return calculatePriceForExport(item, "CP-3", exportRecord);
     }
 
     return item.cp1Price;
@@ -155,12 +187,10 @@ export function StageConfigForm({
     else if (mode === "separate") key = item.sku;
     else if (mode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
-    // 1. Manual Override takes priority
     if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
       return config.rowOverrides[key];
     }
 
-    // 2. Correct Aggregation: Find all items that belonged to this group in THAT stage
     const exportBoxIds = exportRecord.invoiceBoxes.map((ib: any) => ib.boxId);
     const groupItems = boxes
       .filter(b => exportBoxIds.includes(b.id))
@@ -187,11 +217,8 @@ export function StageConfigForm({
     });
 
     const avgBasePrice = totalPriceSum / totalQty;
-    
-    // Apply % and Flat
     let price = (avgBasePrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
     
-    // Apply Stacked Grade Markups if enabled in THAT stage
     if (config.enableGradeMarkups && config.gradeMarkups) {
       const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
       let highestIndex = -1;
@@ -229,10 +256,12 @@ export function StageConfigForm({
       }
 
       const group = groups[key];
-      const lastStagePrice = getHistoricalPrice(item, fromCompany);
+      const lastStagePrice = getHistoricalPrice(item, fromCompany) || 0;
       
       const newQty = group.qty + item.quantity;
-      group.totalPrice = (group.totalPrice * group.qty + lastStagePrice * item.quantity) / newQty;
+      if (newQty > 0) {
+        group.totalPrice = (group.totalPrice * group.qty + lastStagePrice * item.quantity) / newQty;
+      }
       group.qty = newQty;
       group.grades.add(item.grade);
     });
@@ -240,61 +269,93 @@ export function StageConfigForm({
     return Object.entries(groups).map(([key, data]) => ({
       key,
       ...data,
-      avgPrice: data.totalPrice
+      avgPrice: data.totalPrice || 0
     }));
-  }, [rawItems, configMode, fromCompany, allExports]);
+  }, [rawItems, configMode, fromCompany, allExports, boxes]);
 
+  const displayItems = useMemo(() => {
+    let result = [...aggregatedItems].filter(item => 
+      item.productName.toLowerCase().includes(search.toLowerCase()) ||
+      item.sku.toLowerCase().includes(search.toLowerCase())
+    );
 
+    if (sortField) {
+      result.sort((a: any, b: any) => {
+        let valA = a[sortField];
+        let valB = b[sortField];
+        
+        // Handle calculated prices if sorting by current stage
+        if (sortField === "currentPrice") {
+          valA = calculateRowPrice(a.avgPrice, a.key);
+          valB = calculateRowPrice(b.avgPrice, b.key);
+        }
+
+        if (typeof valA === "string" && typeof valB === "string") {
+          return sortOrder === "asc" 
+            ? valA.localeCompare(valB)
+            : valB.localeCompare(valA);
+        }
+        return sortOrder === "asc" 
+          ? (valA as number) - (valB as number)
+          : (valB as number) - (valA as number);
+      });
+    }
+
+    return result;
+  }, [aggregatedItems, search, sortField, sortOrder, percentageMarkup, flatMarkup, enableGradeMarkups, gradeMarkups, rowOverrides]);
+
+  const toggleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortOrder("asc");
+    }
+  };
+
+  const SortIcon = ({ field }: { field: string }) => {
+    if (sortField !== field) return <span style={{ opacity: 0.3, marginLeft: '4px' }}>↕</span>;
+    return <span style={{ marginLeft: '4px' }}>{sortOrder === "asc" ? "↑" : "↓"}</span>;
+  };
 
   const getStackedGradeMarkup = (grades: Set<string>): number => {
     if (!enableGradeMarkups) return 0;
-    
     let total = 0;
     const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-    
-    // Find the "highest" grade present in this group
     let highestIndex = -1;
     gradesList.forEach((g, idx) => {
       if (grades.has(g)) highestIndex = idx;
     });
-
     if (highestIndex === -1) return 0;
-
-    // Sum all markups up to the highest grade present
     for (let i = 0; i <= highestIndex; i++) {
       total += (gradeMarkups[gradesList[i]] || 0);
     }
-    
     return total;
   };
 
   const calculateRowPrice = (avgBasePrice: number, key: string) => {
     if (rowOverrides[key] !== undefined) return rowOverrides[key];
-    
-    // Base Calculation: % and Flat
-    let price = (avgBasePrice * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
-    
-    // Add Stacked Grading Markups if enabled
+    const base = avgBasePrice || 0;
+    let price = (base * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
     if (enableGradeMarkups) {
       const group = aggregatedItems.find(i => i.key === key);
       if (group) {
         price += getStackedGradeMarkup(group.grades);
       }
     }
-    
-    return Math.round(price);
+    return Math.round(price) || 0;
   };
 
   const totalQty = aggregatedItems.reduce((sum, item) => sum + item.qty, 0);
+  const totalLastStageValue = aggregatedItems.reduce((sum, item) => sum + (item.avgPrice * item.qty), 0);
   const totalValue = aggregatedItems.reduce((sum, item) => sum + (calculateRowPrice(item.avgPrice, item.key) * item.qty), 0);
   const totalProfit = aggregatedItems.reduce((sum, item) => sum + ((calculateRowPrice(item.avgPrice, item.key) - item.avgPrice) * item.qty), 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', margin: '0.5rem' }}>
-      {/* Header Info Section */}
       <div className="flex justify-between items-center bg-white/5 p-6 rounded-xl border border-white/10">
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-          <h1 className="mb-1" style={{ fontSize: '1.5rem' }}>{fromCompany} &rarr; {toCompany} Strategy</h1>
+          <h1 className="mb-1" style={{ fontSize: '1.5rem' }}>{fromCompany} &rarr; {toCompany} Branch</h1>
           <div className="flex items-center gap-2 text-xs text-secondary">
             <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: isSaving ? 'var(--accent-primary)' : 'var(--accent-success)' }} />
             {isSaving ? "Saving..." : lastSaved ? `All changes saved ${timeAgo}` : "Not saved yet"}
@@ -303,19 +364,13 @@ export function StageConfigForm({
         
         <div style={{ flex: 2, display: 'flex', justifyContent: 'center', gap: '4rem' }}>
           <div className="flex flex-col items-center">
-            <span className="info-label">Current Scale</span>
+            <span className="info-label">Branch Scale</span>
             <span className="info-value" style={{ fontSize: '1.25rem' }}>{totalQty} Units</span>
           </div>
           <div className="flex flex-col items-center">
-            <span className="info-label">Total Profit</span>
+            <span className="info-label">Branch Profit</span>
             <span className="info-value" style={{ color: 'var(--accent-success)', fontSize: '1.25rem' }}>
               +€{totalProfit.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-            </span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="info-label">Projected Exit Value</span>
-            <span className="info-value" style={{ color: 'var(--accent-primary)', fontSize: '1.25rem' }}>
-              €{totalValue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
             </span>
           </div>
         </div>
@@ -325,6 +380,7 @@ export function StageConfigForm({
             <input type="hidden" name="cycleId" value={cycleId} />
             <input type="hidden" name="fromCompany" value={fromCompany} />
             <input type="hidden" name="toCompany" value={toCompany} />
+            <input type="hidden" name="branchName" value={branchName} />
             <input type="hidden" name="boxIds" value={JSON.stringify(selectedBoxIds)} />
             <input type="hidden" name="configMode" value={configMode} />
             <input type="hidden" name="markupConfig" value={JSON.stringify({ 
@@ -334,21 +390,31 @@ export function StageConfigForm({
               gradeMarkups, 
               rowOverrides 
             })} />
-            <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 2rem' }} disabled={selectedBoxIds.length === 0}>
+            <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 2rem' }} disabled={selectedBoxIds.length === 0 || !branchName}>
               Export CSV
             </button>
           </form>
         </div>
       </div>
 
-      {/* Step 1: Horizontal Strategy Row */}
-      <div className="card glass-card p-6" style={{ marginBottom: '0' }}>
+      <div className="card glass-card p-6">
         <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
           <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>1</span>
-          Global Implementation Strategy
+          Branch Definition
         </h3>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'flex-end' }}>
-          <div style={{ flex: '2', minWidth: '250px' }}>
+        <div style={{ display: 'flex', gap: '2rem' }}>
+          <div style={{ flex: '1' }}>
+            <label className="info-label">Branch Name</label>
+            <input
+              type="text"
+              className="input-field w-full"
+              placeholder="e.g. Premium Grade Branch or High-Volume Mix"
+              value={branchName}
+              onChange={(e) => setBranchName(e.target.value)}
+              required
+            />
+          </div>
+          <div style={{ flex: '1' }}>
             <label className="info-label">Selling Method</label>
             <select
               className="input-field w-full"
@@ -360,7 +426,15 @@ export function StageConfigForm({
               <option value="premium-mixed">Premium by SKU / Others Mixed</option>
             </select>
           </div>
+        </div>
+      </div>
 
+      <div className="card glass-card p-6">
+        <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
+          <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>2</span>
+          Markup Strategy
+        </h3>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'flex-end' }}>
           <div style={{ flex: '1', minWidth: '120px' }}>
             <label className="info-label">Percentage (%)</label>
             <input
@@ -382,135 +456,129 @@ export function StageConfigForm({
               onChange={(e) => setFlatMarkup(Number(e.target.value))}
             />
           </div>
-        </div>
 
-
-
-        {/* Grading Markup Flow */}
-        <div style={{ marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '1px solid var(--border-subtle)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
+          <div style={{ flex: '2', minWidth: '300px' }}>
             <div 
               className="flex items-center gap-3" 
               onClick={() => setEnableGradeMarkups(!enableGradeMarkups)}
-              style={{ cursor: 'pointer', userSelect: 'none' }}
+              style={{ cursor: 'pointer', userSelect: 'none', background: 'rgba(255,255,255,0.03)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}
             >
               <div style={{
-                width: '40px',
-                height: '20px',
+                width: '32px',
+                height: '16px',
                 background: enableGradeMarkups ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)',
-                borderRadius: '20px',
+                borderRadius: '16px',
                 position: 'relative',
-                transition: 'all 0.3s ease',
-                marginRight: '0.5rem'
+                transition: 'all 0.3s ease'
               }}>
                 <div style={{
-                  width: '16px',
-                  height: '16px',
+                  width: '12px',
+                  height: '12px',
                   background: 'white',
                   borderRadius: '50%',
                   position: 'absolute',
                   top: '2px',
-                  left: enableGradeMarkups ? '22px' : '2px',
-                  transition: 'all 0.3s ease',
-                  boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                  left: enableGradeMarkups ? '18px' : '2px',
+                  transition: 'all 0.3s ease'
                 }} />
               </div>
-              <label className="info-label" style={{ margin: 0, fontSize: '0.85rem', cursor: 'pointer', textTransform: 'none', fontWeight: 600 }}>
-                Enable Grading Markup Layer
+              <label className="info-label" style={{ margin: 0, fontSize: '0.8rem', cursor: 'pointer', textTransform: 'none', fontWeight: 600 }}>
+                Enable Grading Markups
               </label>
             </div>
-            {enableGradeMarkups && (
-              <div className="text-xs text-secondary italic" style={{ opacity: 0.8 }}>
-                &rarr; System will add specific values for every grade present in the group.
-              </div>
-            )}
           </div>
-          
-          {enableGradeMarkups && (
-            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', animation: 'fadeIn 0.3s ease' }}>
-              {["B Grade", "G Grade", "A Grade", "Premium"].map(grade => (
-                <div key={grade} style={{ flex: 1, minWidth: '160px', background: 'rgba(255,255,255,0.02)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
-                  <label className="info-label" style={{ color: 'var(--accent-primary)', marginBottom: '0.5rem', fontSize: '0.7rem' }}>{grade}</label>
-                  <div className="flex items-center gap-2">
-                    <span className="text-secondary" style={{ fontSize: '0.8rem' }}>+</span>
-                    <input 
-                      type="number" 
-                      className="input-field w-full" 
-                      style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--border-subtle)', borderRadius: 0, padding: '0.1rem 0', fontSize: '1rem' }}
-                      placeholder="0"
-                      value={gradeMarkups[grade] || ""}
-                      onChange={(e) => setGradeMarkups({ ...gradeMarkups, [grade]: Number(e.target.value) })}
-                    />
-                    <span className="text-secondary" style={{ fontSize: '0.8rem' }}>€</span>
-                  </div>
+        </div>
+
+        {enableGradeMarkups && (
+          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginTop: '1rem', animation: 'fadeIn 0.3s ease' }}>
+            {["B Grade", "G Grade", "A Grade", "Premium"].map(grade => (
+              <div key={grade} style={{ flex: 1, minWidth: '150px', background: 'rgba(255,255,255,0.02)', padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                <label className="info-label" style={{ color: 'var(--accent-primary)', marginBottom: '0.25rem', fontSize: '0.65rem' }}>{grade}</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-secondary" style={{ fontSize: '0.7rem' }}>+€</span>
+                  <input 
+                    type="number" 
+                    className="input-field w-full" 
+                    style={{ background: 'transparent', border: 'none', padding: '0', fontSize: '0.9rem' }}
+                    value={gradeMarkups[grade] || ""}
+                    onChange={(e) => setGradeMarkups({ ...gradeMarkups, [grade]: Number(e.target.value) })}
+                  />
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-
-      </div>
-
-      {/* Step 2: Compact Box Grid */}
-      <div className="card glass-card p-6" style={{ marginBottom: '0' }}>
-        <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
-          <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>2</span>
-          Source Inventory Selection
-        </h3>
-        <div className="box-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.75rem' }}>
-          {boxes.map(box => (
-            <div
-              key={box.id}
-              className={`box-card ${selectedBoxIds.includes(box.id) ? 'selected' : ''}`}
-              style={{ padding: '0.75rem' }}
-              onClick={() => {
-                if (selectedBoxIds.includes(box.id)) setSelectedBoxIds(selectedBoxIds.filter(id => id !== box.id));
-                else setSelectedBoxIds([...selectedBoxIds, box.id]);
-              }}
-            >
-              <div className="check-indicator" style={{ width: '14px', height: '14px', fontSize: '8px' }}>
-                {selectedBoxIds.includes(box.id) && "✓"}
               </div>
-              <div className="wio-num" style={{ fontSize: '0.65rem' }}>{box.wioNumber}</div>
-              <div className="wio-name" style={{ fontSize: '0.8rem' }}>{box.wioName}</div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Step 3: Pricing Preview */}
-      <div className="card glass-card p-0 overflow-hidden mb-10">
-        <div className="p-6 border-bottom" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-          <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
-            <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>3</span>
+      <div className="card glass-card p-6">
+        <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
+          <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>3</span>
+          Box Inventory Assignment
+        </h3>
+        {availableBoxes.length === 0 ? (
+          <div className="text-center py-8 text-secondary italic">
+            All boxes for this stage are already assigned to other branches.
+          </div>
+        ) : (
+          <div className="box-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.75rem' }}>
+            {availableBoxes.map(box => (
+              <div
+                key={box.id}
+                className={`box-card ${selectedBoxIds.includes(box.id) ? 'selected' : ''}`}
+                style={{ padding: '0.75rem' }}
+                onClick={() => {
+                  if (selectedBoxIds.includes(box.id)) setSelectedBoxIds(selectedBoxIds.filter(id => id !== box.id));
+                  else setSelectedBoxIds([...selectedBoxIds, box.id]);
+                }}
+              >
+                <div className="check-indicator" style={{ width: '14px', height: '14px', fontSize: '8px' }}>
+                  {selectedBoxIds.includes(box.id) && "✓"}
+                </div>
+                <div className="wio-num" style={{ fontSize: '0.65rem' }}>{box.wioNumber}</div>
+                <div className="wio-name" style={{ fontSize: '0.8rem' }}>{box.wioName}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card glass-card p-0 overflow-hidden mb-20">
+        <div className="p-6 border-bottom" style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary">
+            <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>4</span>
             Pricing Preview & Manual Overrides
           </h3>
+          <div style={{ width: '300px' }}>
+            <input 
+              type="text" 
+              className="input-field"
+              placeholder="Search items..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{ background: 'rgba(0,0,0,0.2)', padding: '0.5rem 1rem', fontSize: '0.8rem', width: '100%', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', color: 'white' }}
+            />
+          </div>
         </div>
         <div className="table-container" style={{ border: 'none', borderRadius: '0' }}>
           <table style={{ fontSize: '0.875rem' }}>
             <thead>
               <tr>
-                <th className="text-center">Item Definition</th>
-                <th className="text-center">SKU</th>
-                <th className="text-center">Qty</th>
-                <th className="text-center">Avg Last Stage</th>
+                <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("productName")}>Item Definition <SortIcon field="productName" /></th>
+                <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("sku")}>SKU <SortIcon field="sku" /></th>
+                <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("qty")}>Qty <SortIcon field="qty" /></th>
+                <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("avgPrice")}>Avg Last Stage <SortIcon field="avgPrice" /></th>
                 <th className="text-center">Added Value</th>
-                <th className="text-center" style={{ width: '200px' }}>Current Stage (€)</th>
+                <th className="text-center" style={{ width: '200px', cursor: 'pointer' }} onClick={() => toggleSort("currentPrice")}>Current Stage (€) <SortIcon field="currentPrice" /></th>
               </tr>
             </thead>
             <tbody>
-              {aggregatedItems.map(item => {
+              {displayItems.map(item => {
                 const finalPrice = calculateRowPrice(item.avgPrice, item.key);
-                const markupVal = finalPrice - item.avgPrice;
-
                 return (
                   <tr key={item.key}>
                     <td className="text-center" style={{ padding: '0.75rem 1rem' }}>
                       <div style={{ fontWeight: 600 }}>{item.productName}</div>
-                      <div className="text-xs text-secondary">
-                        {Array.from(item.grades).sort().join(", ")}
-                      </div>
+                      <div className="text-xs text-secondary">{Array.from(item.grades).sort().join(", ")}</div>
                     </td>
                     <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem' }}>
                       {configMode === "mixed" ? "MIXED" : item.sku}
@@ -518,20 +586,22 @@ export function StageConfigForm({
                     <td className="text-center" style={{ fontWeight: 600 }}>{item.qty}</td>
                     <td className="font-mono text-secondary text-center">€{item.avgPrice.toFixed(2)}</td>
                     <td className="text-center">
-                      {rowOverrides[item.key] !== undefined ? (
-                        <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>Manual</span>
-                      ) : (
-                        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.75rem', fontWeight: 600, fontSize: '0.85rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.75rem', fontWeight: 600, fontSize: '0.85rem' }}>
+                        {rowOverrides[item.key] !== undefined ? (
                           <span style={{ color: 'var(--accent-primary)' }}>
-                            +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)}
+                            +€{(rowOverrides[item.key] - item.avgPrice).toFixed(2)} (Manual)
                           </span>
-                          {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
-                            <span style={{ color: '#ff8c00' }}>
-                              + €{getStackedGradeMarkup(item.grades).toFixed(2)}
+                        ) : (
+                          <>
+                            <span style={{ color: 'var(--accent-primary)' }}>
+                              +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)}
                             </span>
-                          )}
-                        </div>
-                      )}
+                            {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
+                              <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)}</span>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </td>
                     <td style={{ padding: '0.5rem' }} className="text-center">
                       <div className="flex justify-center">
@@ -544,30 +614,47 @@ export function StageConfigForm({
                   </tr>
                 );
               })}
-              {aggregatedItems.length === 0 && (
+              {aggregatedItems.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="text-center py-20 text-secondary">
                     Select source inventory to calculate prices.
                   </td>
                 </tr>
-              )}
+              ) : displayItems.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="text-center py-20 text-secondary">
+                    No items match your search "{search}".
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
+            {aggregatedItems.length > 0 && (
+              <tfoot style={{ background: 'rgba(255,255,255,0.05)', fontWeight: 700, borderTop: '2px solid var(--border-subtle)' }}>
+                <tr>
+                  <td colSpan={2} className="text-right" style={{ padding: '1rem', textTransform: 'uppercase', fontSize: '0.75rem', opacity: 0.7 }}>Totals</td>
+                  <td className="text-center" style={{ padding: '1rem' }}>{totalQty}</td>
+                  <td className="text-center" style={{ padding: '1rem' }}>€{totalLastStageValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                  <td className="text-center" style={{ padding: '1rem', color: 'var(--accent-primary)' }}>
+                    +€{totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </td>
+                  <td className="text-center" style={{ padding: '1rem', fontSize: '1.1rem' }}>€{totalValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </div>
-
-
     </div>
   );
 }
 
 // Helper component to fix "weird" input behavior
 function ManualPriceInput({ initialValue, onSave }: { initialValue: number, onSave: (val: number) => void }) {
-  const [localVal, setLocalVal] = useState(initialValue.toFixed(2));
+  const [localVal, setLocalVal] = useState((initialValue || 0).toFixed(2));
 
   // Sync when global changes, but only if not focused
   useEffect(() => {
-    setLocalVal(initialValue.toFixed(2));
+    setLocalVal((initialValue || 0).toFixed(2));
   }, [initialValue]);
 
   return (

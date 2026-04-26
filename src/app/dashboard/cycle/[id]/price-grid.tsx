@@ -59,7 +59,7 @@ export function MasterPriceGrid({ data }: { data: PriceRow[] }) {
   };
 
   return (
-    <div className="card" style={{ padding: 0, overflow: 'hidden', border: '1px solid var(--border-subtle)', marginTop: '2rem' }}>
+    <div className="card" style={{ padding: 0, overflow: 'hidden', border: '1px solid var(--border-subtle)', margin: '0 0.5rem' }}>
       <div 
         className="cursor-pointer hover:bg-white/5 transition-colors"
         onClick={() => setIsExpanded(!isExpanded)}
