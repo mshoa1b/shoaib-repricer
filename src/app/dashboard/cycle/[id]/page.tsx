@@ -44,12 +44,17 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
   const allBoxes = cycle.boxes;
 
   const getHistoricalPrice = (item: any, targetStage: string): number => {
-    if (targetStage === "CP1") return item.cp1Price;
-    if (targetStage === "CP2") return item.cp1Price;
+    // Normalize stage name: "CP-3" -> "CP3" so both formats are handled
+    const stage = targetStage.replace("-", "");
 
-    const boxId = item.boxId;
+    if (stage === "CP1") return item.cp1Price;
+    if (stage === "CP2") return item.cp1Price;
 
-    if (targetStage === "CP3") {
+    // Find boxId by searching allBoxes (avoids relying on item.boxId being populated)
+    const boxId = item.boxId || allBoxes.find(b => b.items.some((i: any) => i.id === item.id))?.id;
+    if (!boxId) return item.cp1Price;
+
+    if (stage === "CP3") {
       const exportRecord = allExports.find(e => 
         e.fromCompany === "CP-2" && 
         e.toCompany === "CP-3" && 
@@ -59,7 +64,7 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
       return calculatePriceForExport(item, "CP-2", exportRecord);
     }
 
-    if (targetStage === "CP4") {
+    if (stage === "CP4") {
       const exportRecord = allExports.find(e => 
         e.fromCompany === "CP-3" && 
         e.toCompany === "CP-4" && 
@@ -69,7 +74,7 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
       return calculatePriceForExport(item, "CP-3", exportRecord);
     }
 
-    if (targetStage === "CP5") {
+    if (stage === "CP5") {
       const exportRecord = allExports.find(e => 
         e.fromCompany === "CP-4" && 
         e.toCompany === "CP-5" && 
@@ -138,14 +143,84 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
     return Math.round(price);
   };
 
-  const calculateStageTotal = (stage: string) => {
-    let total = 0;
-    cycle.boxes.forEach(box => {
-      box.items.forEach(item => {
-        total += item.quantity * getHistoricalPrice(item, stage);
+  const calculateStageTotal = (toStage: string) => {
+    // CP-1 and CP-2 are always cp1Price across all boxes
+    if (toStage === "CP1" || toStage === "CP2") {
+      let total = 0;
+      cycle.boxes.forEach(box => box.items.forEach(item => {
+        total += item.quantity * item.cp1Price;
+      }));
+      return total;
+    }
+
+    const stagePairs: Record<string, { from: string; to: string }> = {
+      "CP3": { from: "CP-2", to: "CP-3" },
+      "CP4": { from: "CP-3", to: "CP-4" },
+      "CP5": { from: "CP-4", to: "CP-5" },
+    };
+    const pair = stagePairs[toStage];
+    if (!pair) return 0;
+
+    // The base stage for the "avg last stage" lookup
+    const baseStageKey = pair.from.replace("CP-", "CP");
+
+    const stageExports = allExports.filter(e => e.fromCompany === pair.from && e.toCompany === pair.to);
+    let grandTotal = 0;
+
+    // For each branch at this stage, mirror the stage form's aggregatedItems logic exactly
+    stageExports.forEach(branch => {
+      const config = JSON.parse(branch.markupConfig || "{}");
+      const mode = branch.configurationMode || "mixed";
+      const branchBoxIds = branch.invoiceBoxes.map((ib: any) => ib.boxId);
+      const branchBoxes = allBoxes.filter(b => branchBoxIds.includes(b.id));
+
+      // Group items by key (same as aggregatedItems in stage form)
+      const groups: Record<string, { qty: number; avgPrice: number; grades: Set<string> }> = {};
+
+      branchBoxes.forEach(box => {
+        box.items.forEach(item => {
+          let key = "";
+          if (mode === "mixed") key = item.productName;
+          else if (mode === "separate") key = item.sku;
+          else if (mode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
+
+          if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, grades: new Set() };
+          
+          const basePrice = getHistoricalPrice(item, baseStageKey);
+          const newQty = groups[key].qty + item.quantity;
+          groups[key].avgPrice = (groups[key].avgPrice * groups[key].qty + basePrice * item.quantity) / newQty;
+          groups[key].qty = newQty;
+          groups[key].grades.add(item.grade);
+        });
+      });
+
+      // Apply markup to each group (same as calculateRowPrice in stage form)
+      Object.entries(groups).forEach(([key, group]) => {
+        let finalPrice: number;
+
+        if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
+          finalPrice = config.rowOverrides[key];
+        } else {
+          let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+
+          if (config.enableGradeMarkups && config.gradeMarkups) {
+            const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+            let highestIndex = -1;
+            gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
+            if (highestIndex !== -1) {
+              for (let i = 0; i <= highestIndex; i++) {
+                price += (config.gradeMarkups[gradesList[i]] || 0);
+              }
+            }
+          }
+          finalPrice = Math.round(price);
+        }
+
+        grandTotal += finalPrice * group.qty;
       });
     });
-    return total;
+
+    return grandTotal;
   };
 
   const cp1Total = calculateStageTotal("CP1");
@@ -153,6 +228,52 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
   const cp3Total = calculateStageTotal("CP3");
   const cp4Total = calculateStageTotal("CP4");
   const cp5Total = calculateStageTotal("CP5");
+
+  // Compute per-branch stats: total qty and total current stage value
+  const computeBranchStats = (branch: any): { totalQty: number; totalValue: number } => {
+    const config = JSON.parse(branch.markupConfig || "{}");
+    const mode = branch.configurationMode || "mixed";
+    const branchBoxIds = branch.invoiceBoxes.map((ib: any) => ib.boxId);
+    const branchBoxes = allBoxes.filter(b => branchBoxIds.includes(b.id));
+    const baseStage = branch.fromCompany.replace("CP-", "CP"); // "CP-2" -> "CP2"
+
+    const groups: Record<string, { qty: number; avgPrice: number; grades: Set<string> }> = {};
+    branchBoxes.forEach(box => {
+      box.items.forEach((item: any) => {
+        let key = "";
+        if (mode === "mixed") key = item.productName;
+        else if (mode === "separate") key = item.sku;
+        else if (mode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
+        if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, grades: new Set() };
+        const basePrice = getHistoricalPrice(item, baseStage);
+        const newQty = groups[key].qty + item.quantity;
+        groups[key].avgPrice = (groups[key].avgPrice * groups[key].qty + basePrice * item.quantity) / newQty;
+        groups[key].qty = newQty;
+        groups[key].grades.add(item.grade);
+      });
+    });
+
+    let totalQty = 0;
+    let totalValue = 0;
+    Object.entries(groups).forEach(([key, group]) => {
+      let finalPrice: number;
+      if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
+        finalPrice = config.rowOverrides[key];
+      } else {
+        let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+        if (config.enableGradeMarkups && config.gradeMarkups) {
+          const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+          let highestIndex = -1;
+          gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
+          if (highestIndex !== -1) for (let i = 0; i <= highestIndex; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
+        }
+        finalPrice = Math.round(price);
+      }
+      totalQty += group.qty;
+      totalValue += finalPrice * group.qty;
+    });
+    return { totalQty, totalValue };
+  };
 
   const masterData = cycle.boxes.flatMap(box => 
     box.items.map(item => ({
@@ -228,12 +349,33 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
           {STAGES.map((stage) => {
             const stageExports = cycle.exports.filter(e => e.fromCompany === stage.from && e.toCompany === stage.to);
 
+            // Accumulate stats across all branches in this stage
+            const stageStats = stageExports.reduce(
+              (acc, exp) => {
+                const s = computeBranchStats(exp);
+                return { totalQty: acc.totalQty + s.totalQty, totalValue: acc.totalValue + s.totalValue };
+              },
+              { totalQty: 0, totalValue: 0 }
+            );
+
             return (
               <div key={stage.id} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 0.25rem' }}>
-                  <h3 style={{ fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '0.15em', color: 'var(--text-secondary)', fontWeight: 800 }}>
-                    {stage.from} &rarr; {stage.to}
-                  </h3>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+                    <h3 style={{ fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: '0.15em', color: 'var(--text-secondary)', fontWeight: 800, margin: 0 }}>
+                      {stage.from} &rarr; {stage.to}
+                    </h3>
+                    {stageExports.length > 0 && (
+                      <div style={{ display: 'flex', gap: '1rem' }}>
+                        <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.07)', padding: '0.2rem 0.75rem', borderRadius: '20px', color: 'var(--text-secondary)' }}>
+                          {stageStats.totalQty.toLocaleString()} units
+                        </span>
+                        <span style={{ fontSize: '0.75rem', background: 'rgba(99,179,237,0.12)', padding: '0.2rem 0.75rem', borderRadius: '20px', color: 'var(--accent-primary)', fontWeight: 600 }}>
+                          €{stageStats.totalValue.toLocaleString(undefined, { minimumFractionDigits: 0 })}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                   <Link 
                     href={`/dashboard/cycle/${cycle.id}/stage/${stage.id}/new`} 
                     className="btn btn-secondary"
@@ -262,14 +404,19 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                    {stageExports.map(exp => (
-                      <BranchItem 
-                        key={exp.id} 
-                        exp={exp} 
-                        cycleId={cycle.id} 
-                        stageId={stage.id} 
-                      />
-                    ))}
+                    {stageExports.map(exp => {
+                        const stats = computeBranchStats(exp);
+                        return (
+                          <BranchItem 
+                            key={exp.id} 
+                            exp={exp} 
+                            cycleId={cycle.id} 
+                            stageId={stage.id}
+                            totalQty={stats.totalQty}
+                            totalValue={stats.totalValue}
+                          />
+                        );
+                      })}
                   </div>
                 )}
               </div>
