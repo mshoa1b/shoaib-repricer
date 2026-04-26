@@ -5,8 +5,8 @@ import { LogoutButton } from "./components/logout-button";
 import { cookies } from "next/headers";
 
 export const metadata: Metadata = {
-  title: "Telecore Invoice Ecosystem",
-  description: "B2B Invoice Pricing & Export Ecosystem",
+  title: "The Ecosystem",
+  description: "B2B Invoice Pricing & Export System",
 };
 
 export default async function RootLayout({
@@ -30,7 +30,7 @@ export default async function RootLayout({
           backdropFilter: 'blur(10px)'
         }}>
           <div style={{ fontWeight: 600, fontSize: '1.25rem' }}>
-            <span style={{ color: 'var(--accent-primary)' }}>Telecore</span> Ecosystem
+            The <span style={{ color: 'var(--accent-primary)' }}>Ecosystem</span>
           </div>
           {isAuthenticated && (
             <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
