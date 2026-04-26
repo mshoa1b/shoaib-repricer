@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       String @id @default(cuid())
+  username String @unique
+  password String
+}
+
+model Cycle {
+  id        String          @id @default(cuid())
+  name      String
+  date      DateTime        @default(now())
+  status    String          @default("ACTIVE")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  boxes     Box[]
+  exports   InvoiceExport[]
+}
+
+model Box {
+  id           String       @id @default(cuid())
+  wioName      String
+  wioNumber    String
+  cycleId      String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  cycle        Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  invoiceBoxes InvoiceBox[]
+  items        Item[]
+
+  @@unique([wioNumber, cycleId])
+}
+
+model Item {
+  id          String   @id @default(cuid())
+  boxId       String
+  productName String
+  sku         String
+  grade       String
+  quantity    Int
+  cp1Price    Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  box         Box      @relation(fields: [boxId], references: [id], onDelete: Cascade)
+}
+
+model InvoiceExport {
+  id                String       @id @default(cuid())
+  cycleId           String
+  fromCompany       String
+  toCompany         String
+  configurationMode String
+  markupConfig      String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  invoiceBoxes      InvoiceBox[]
+  cycle             Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+}
+
+model InvoiceBox {
+  invoiceExportId String
+  boxId           String
+  box             Box           @relation(fields: [boxId], references: [id], onDelete: Cascade)
+  invoiceExport   InvoiceExport @relation(fields: [invoiceExportId], references: [id], onDelete: Cascade)
+
+  @@id([invoiceExportId, boxId])
+}
