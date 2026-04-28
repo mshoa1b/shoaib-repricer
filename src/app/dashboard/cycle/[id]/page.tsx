@@ -175,7 +175,7 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
       const branchBoxes = allBoxes.filter(b => branchBoxIds.includes(b.id));
 
       // Group items by key (same as aggregatedItems in stage form)
-      const groups: Record<string, { qty: number; avgPrice: number; grades: Set<string> }> = {};
+      const groups: Record<string, { qty: number; avgPrice: number; totalOffsetSum: number; grades: Set<string> }> = {};
 
       branchBoxes.forEach(box => {
         box.items.forEach(item => {
@@ -184,11 +184,12 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
           else if (mode === "separate") key = item.sku;
           else if (mode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
-          if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, grades: new Set() };
+          if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, totalOffsetSum: 0, grades: new Set() };
           
           const basePrice = getHistoricalPrice(item, baseStageKey);
           const newQty = groups[key].qty + item.quantity;
           groups[key].avgPrice = (groups[key].avgPrice * groups[key].qty + basePrice * item.quantity) / newQty;
+          groups[key].totalOffsetSum += ((item as any).cp1Offset || 0) * item.quantity;
           groups[key].qty = newQty;
           groups[key].grades.add(item.grade);
         });
@@ -205,37 +206,21 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
           // If we are in CP-5, we need to apply offsets per item because the sum of offsets 
           // in a partial branch might not be zero.
           if (pair.to === "CP-5") {
-            branchBoxes.forEach(box => {
-              box.items.forEach(item => {
-                let iKey = "";
-                if (mode === "mixed") iKey = item.productName;
-                else if (mode === "separate") iKey = item.sku;
-                else if (mode === "premium-mixed") iKey = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
-                
-                if (iKey !== key) return;
+            const avgOffset = group.totalOffsetSum / group.qty;
+            let price = ((group.avgPrice + avgOffset) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
 
-                let price = ((group.avgPrice + (item.cp1Offset || 0)) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
-
-                if (config.enableGradeMarkups && config.gradeMarkups) {
-                  const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-                  let highestIndex = -1;
-                  gradesList.forEach((g, idx) => { if (item.grade === g) highestIndex = idx; }); // Note: Simplified grade lookup for single item
-                  // Wait, grade markups are based on the grades present in the GROUP in the original logic.
-                  // But if we split, should we use the item's grade or the group's highest grade?
-                  // The user said "Split first, then markup". 
-                  // In the stage form, I used group.grades.
-                  let highestGradeInGroup = -1;
-                  gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
-                  
-                  if (highestGradeInGroup !== -1) {
-                    for (let i = 0; i <= highestGradeInGroup; i++) {
-                      price += (config.gradeMarkups[gradesList[i]] || 0);
-                    }
-                  }
+            if (config.enableGradeMarkups && config.gradeMarkups) {
+              const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+              let highestGradeInGroup = -1;
+              gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
+              
+              if (highestGradeInGroup !== -1) {
+                for (let i = 0; i <= highestGradeInGroup; i++) {
+                  price += (config.gradeMarkups[gradesList[i]] || 0);
                 }
-                grandTotal += Math.round(price) * item.quantity;
-              });
-            });
+              }
+            }
+            grandTotal += Math.round(price) * group.qty;
           } else {
             let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
 
@@ -273,17 +258,18 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
     const branchBoxes = allBoxes.filter(b => branchBoxIds.includes(b.id));
     const baseStage = branch.fromCompany.replace("CP-", "CP"); // "CP-2" -> "CP2"
 
-    const groups: Record<string, { qty: number; avgPrice: number; grades: Set<string> }> = {};
+    const groups: Record<string, { qty: number; avgPrice: number; totalOffsetSum: number; grades: Set<string> }> = {};
     branchBoxes.forEach(box => {
       box.items.forEach((item: any) => {
         let key = "";
         if (mode === "mixed") key = item.productName;
         else if (mode === "separate") key = item.sku;
         else if (mode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
-        if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, grades: new Set() };
+        if (!groups[key]) groups[key] = { qty: 0, avgPrice: 0, totalOffsetSum: 0, grades: new Set() };
         const basePrice = getHistoricalPrice(item, baseStage);
         const newQty = groups[key].qty + item.quantity;
         groups[key].avgPrice = (groups[key].avgPrice * groups[key].qty + basePrice * item.quantity) / newQty;
+        groups[key].totalOffsetSum += ((item as any).cp1Offset || 0) * item.quantity;
         groups[key].qty = newQty;
         groups[key].grades.add(item.grade);
       });
@@ -297,26 +283,16 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
         totalQty += group.qty;
       } else {
         if (branch.toCompany === "CP-5") {
-          branchBoxes.forEach(box => {
-            box.items.forEach((item: any) => {
-              let iKey = "";
-              if (mode === "mixed") iKey = item.productName;
-              else if (mode === "separate") iKey = item.sku;
-              else if (mode === "premium-mixed") iKey = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
-              
-              if (iKey !== key) return;
-
-              let price = ((group.avgPrice + (item.cp1Offset || 0)) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
-              if (config.enableGradeMarkups && config.gradeMarkups) {
-                const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-                let highestGradeInGroup = -1;
-                gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
-                if (highestGradeInGroup !== -1) for (let i = 0; i <= highestGradeInGroup; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
-              }
-              totalValue += Math.round(price) * item.quantity;
-              totalQty += item.quantity;
-            });
-          });
+          const avgOffset = group.totalOffsetSum / group.qty;
+          let price = ((group.avgPrice + avgOffset) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+          if (config.enableGradeMarkups && config.gradeMarkups) {
+            const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+            let highestGradeInGroup = -1;
+            gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
+            if (highestGradeInGroup !== -1) for (let i = 0; i <= highestGradeInGroup; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
+          }
+          totalValue += Math.round(price) * group.qty;
+          totalQty += group.qty;
         } else {
           let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
           if (config.enableGradeMarkups && config.gradeMarkups) {

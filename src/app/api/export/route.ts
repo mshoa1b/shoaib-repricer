@@ -132,7 +132,7 @@ export async function POST(req: Request) {
     };
 
     const currentBoxIds = boxIds;
-    const groupData: Record<string, { qty: number, totalPriceSum: number, grades: Set<string> }> = {};
+    const groupData: Record<string, { qty: number, totalPriceSum: number, totalOffsetSum: number, grades: Set<string> }> = {};
     
     allBoxes.filter(b => currentBoxIds.includes(b.id)).forEach(box => {
       box.items.forEach(item => {
@@ -149,7 +149,7 @@ export async function POST(req: Request) {
         
         groupData[key].qty += item.quantity;
         groupData[key].totalPriceSum += (basePriceForThisStage * item.quantity);
-        groupData[key].totalOffsetSum += ((item.cp1Offset || 0) * item.quantity);
+        groupData[key].totalOffsetSum += (((item as any).cp1Offset || 0) * item.quantity);
         groupData[key].grades.add(item.grade);
       });
     });
