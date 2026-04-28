@@ -57,6 +57,7 @@ model Item {
   grade       String
   quantity    Int
   cp1Price    Float
+  cp1Offset   Float    @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   box         Box      @relation(fields: [boxId], references: [id], onDelete: Cascade)

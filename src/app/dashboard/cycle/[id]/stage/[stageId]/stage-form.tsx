@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect, useRef } from "react";
 import { saveStageConfiguration } from "../../../../actions";
+import * as xlsx from "xlsx";
 
 interface Item {
   id: string;
@@ -10,6 +11,7 @@ interface Item {
   grade: string;
   quantity: number;
   cp1Price: number;
+  cp1Offset: number;
 }
 
 interface Box {
@@ -44,7 +46,8 @@ export function StageConfigForm({
   const [selectedBoxIds, setSelectedBoxIds] = useState<string[]>(
     initialData?.invoiceBoxes?.map((b: any) => b.boxId) || []
   );
-  const [configMode, setConfigMode] = useState(initialData?.configurationMode || "mixed");
+  const defaultMode = stageId === "cp4-cp5" ? "separate" : "mixed";
+  const [configMode, setConfigMode] = useState(initialData?.configurationMode || defaultMode);
 
   const [percentageMarkup, setPercentageMarkup] = useState(initialMarkupConfig.percentageMarkup || 0);
   const [flatMarkup, setFlatMarkup] = useState(initialMarkupConfig.flatMarkup || 0);
@@ -140,6 +143,48 @@ export function StageConfigForm({
     selectedBoxIds,
     cycleId, fromCompany, toCompany, currentBranchId
   ]);
+  
+  const handleBulkPriceUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const data = new Uint8Array(event.target?.result as ArrayBuffer);
+      const workbook = xlsx.read(data, { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows: any[] = xlsx.utils.sheet_to_json(sheet);
+
+      const newOverrides = { ...rowOverrides };
+      rows.forEach(row => {
+        const sku = String(row["SKU"] || row["sku"] || "").trim();
+        const priceValue = row["Purchase"] || row["purchase"] || row["Price"] || row["price"];
+        const price = parseFloat(String(priceValue).replace(/[€,]/g, ''));
+        
+        if (!sku || isNaN(price)) return;
+
+        // Find which key this SKU belongs to in the current branch
+        const itemInBranch = boxes
+          .filter(b => selectedBoxIds.includes(b.id))
+          .flatMap(b => b.items)
+          .find(i => i.sku === sku);
+
+        if (itemInBranch) {
+          let key = "";
+          if (configMode === "mixed") key = itemInBranch.productName;
+          else if (configMode === "separate") key = itemInBranch.sku;
+          else if (configMode === "premium-mixed") key = itemInBranch.grade === "Premium" ? itemInBranch.sku : `${itemInBranch.productName}_NON_PREMIUM`;
+
+          if (key) {
+            newOverrides[key] = price;
+          }
+        }
+      });
+      setRowOverrides(newOverrides);
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = ''; // reset
+  };
 
   // Box Exclusivity Logic
   const boxesTakenByOtherBranches = useMemo(() => {
@@ -217,7 +262,14 @@ export function StageConfigForm({
     });
 
     const avgBasePrice = totalPriceSum / totalQty;
-    let price = (avgBasePrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+    
+    // Apply Grade Splitting Offset for the final stage (CP-4 -> CP-5)
+    let baseWithOffset = avgBasePrice;
+    if (toCompany === "CP-5") {
+      baseWithOffset += (item.cp1Offset || 0);
+    }
+
+    let price = (baseWithOffset * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
     
     if (config.enableGradeMarkups && config.gradeMarkups) {
       const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
@@ -243,7 +295,7 @@ export function StageConfigForm({
   }, [boxes, selectedBoxIds]);
 
   const aggregatedItems = useMemo(() => {
-    const groups: Record<string, { productName: string, sku: string, qty: number, totalPrice: number, grades: Set<string> }> = {};
+    const groups: Record<string, { productName: string, sku: string, qty: number, totalPrice: number, totalOffset: number, grades: Set<string> }> = {};
 
     rawItems.forEach(item => {
       let key = "";
@@ -252,7 +304,7 @@ export function StageConfigForm({
       else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
       if (!groups[key]) {
-        groups[key] = { productName: item.productName, sku: item.sku, qty: 0, totalPrice: 0, grades: new Set() };
+        groups[key] = { productName: item.productName, sku: item.sku, qty: 0, totalPrice: 0, totalOffset: 0, grades: new Set() };
       }
 
       const group = groups[key];
@@ -261,6 +313,7 @@ export function StageConfigForm({
       const newQty = group.qty + item.quantity;
       if (newQty > 0) {
         group.totalPrice = (group.totalPrice * group.qty + lastStagePrice * item.quantity) / newQty;
+        group.totalOffset = (group.totalOffset * group.qty + (item.cp1Offset || 0) * item.quantity) / newQty;
       }
       group.qty = newQty;
       group.grades.add(item.grade);
@@ -269,7 +322,8 @@ export function StageConfigForm({
     return Object.entries(groups).map(([key, data]) => ({
       key,
       ...data,
-      avgPrice: data.totalPrice || 0
+      avgPrice: data.totalPrice || 0,
+      avgOffset: data.totalOffset || 0
     }));
   }, [rawItems, configMode, fromCompany, allExports, boxes]);
 
@@ -333,9 +387,14 @@ export function StageConfigForm({
     return total;
   };
 
-  const calculateRowPrice = (avgBasePrice: number, key: string) => {
+  const calculateRowPrice = (avgBasePrice: number, key: string, avgOffset: number = 0) => {
     if (rowOverrides[key] !== undefined) return rowOverrides[key];
-    const base = avgBasePrice || 0;
+    
+    let base = avgBasePrice || 0;
+    if (toCompany === "CP-5") {
+      base += avgOffset;
+    }
+
     let price = (base * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
     if (enableGradeMarkups) {
       const group = aggregatedItems.find(i => i.key === key);
@@ -348,8 +407,8 @@ export function StageConfigForm({
 
   const totalQty = aggregatedItems.reduce((sum, item) => sum + item.qty, 0);
   const totalLastStageValue = aggregatedItems.reduce((sum, item) => sum + (item.avgPrice * item.qty), 0);
-  const totalValue = aggregatedItems.reduce((sum, item) => sum + (calculateRowPrice(item.avgPrice, item.key) * item.qty), 0);
-  const totalProfit = aggregatedItems.reduce((sum, item) => sum + ((calculateRowPrice(item.avgPrice, item.key) - item.avgPrice) * item.qty), 0);
+  const totalValue = aggregatedItems.reduce((sum, item) => sum + (calculateRowPrice(item.avgPrice, item.key, item.avgOffset) * item.qty), 0);
+  const totalProfit = aggregatedItems.reduce((sum, item) => sum + ((calculateRowPrice(item.avgPrice, item.key, item.avgOffset) - item.avgPrice) * item.qty), 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', margin: '0.5rem' }}>
@@ -548,15 +607,21 @@ export function StageConfigForm({
             <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>4</span>
             Pricing Preview & Manual Overrides
           </h3>
-          <div style={{ width: '300px' }}>
-            <input 
-              type="text" 
-              className="input-field"
-              placeholder="Search items..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ background: 'rgba(0,0,0,0.2)', padding: '0.5rem 1rem', fontSize: '0.8rem', width: '100%', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', color: 'white' }}
-            />
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <label className="btn btn-secondary" style={{ padding: '0.4rem 1rem', fontSize: '0.75rem', borderRadius: '8px', cursor: 'pointer', margin: 0 }}>
+              Bulk Upload Pricing
+              <input type="file" accept=".csv, .xlsx, .xls" style={{ display: 'none' }} onChange={handleBulkPriceUpload} />
+            </label>
+            <div style={{ width: '300px' }}>
+              <input 
+                type="text" 
+                className="input-field"
+                placeholder="Search items..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ background: 'rgba(0,0,0,0.2)', padding: '0.5rem 1rem', fontSize: '0.8rem', width: '100%', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)', color: 'white' }}
+              />
+            </div>
           </div>
         </div>
         <div className="table-container" style={{ border: 'none', borderRadius: '0' }}>
@@ -573,7 +638,7 @@ export function StageConfigForm({
             </thead>
             <tbody>
               {displayItems.map(item => {
-                const finalPrice = calculateRowPrice(item.avgPrice, item.key);
+                const finalPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
                 return (
                   <tr key={item.key}>
                     <td className="text-center" style={{ padding: '0.75rem 1rem' }}>
@@ -586,18 +651,23 @@ export function StageConfigForm({
                     <td className="text-center" style={{ fontWeight: 600 }}>{item.qty}</td>
                     <td className="font-mono text-secondary text-center">€{item.avgPrice.toFixed(2)}</td>
                     <td className="text-center">
-                      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.75rem', fontWeight: 600, fontSize: '0.85rem' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.85rem' }}>
                         {rowOverrides[item.key] !== undefined ? (
                           <span style={{ color: 'var(--accent-primary)' }}>
                             +€{(rowOverrides[item.key] - item.avgPrice).toFixed(2)} (Manual)
                           </span>
                         ) : (
                           <>
+                            {(item.avgOffset !== 0 && toCompany === "CP-5") && (
+                              <span style={{ color: item.avgOffset > 0 ? 'var(--accent-primary)' : '#ff5555', fontSize: '0.75rem' }}>
+                                {item.avgOffset > 0 ? '+' : ''}€{item.avgOffset.toFixed(2)} Grade Split
+                              </span>
+                            )}
                             <span style={{ color: 'var(--accent-primary)' }}>
-                              +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)}
+                              +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)} Markup
                             </span>
                             {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
-                              <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)}</span>
+                              <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)} Stacked</span>
                             )}
                           </>
                         )}

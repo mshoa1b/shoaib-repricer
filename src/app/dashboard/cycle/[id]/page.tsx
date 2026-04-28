@@ -200,23 +200,59 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
 
         if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
           finalPrice = config.rowOverrides[key];
+          grandTotal += finalPrice * group.qty;
         } else {
-          let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+          // If we are in CP-5, we need to apply offsets per item because the sum of offsets 
+          // in a partial branch might not be zero.
+          if (pair.to === "CP-5") {
+            branchBoxes.forEach(box => {
+              box.items.forEach(item => {
+                let iKey = "";
+                if (mode === "mixed") iKey = item.productName;
+                else if (mode === "separate") iKey = item.sku;
+                else if (mode === "premium-mixed") iKey = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
+                
+                if (iKey !== key) return;
 
-          if (config.enableGradeMarkups && config.gradeMarkups) {
-            const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-            let highestIndex = -1;
-            gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
-            if (highestIndex !== -1) {
-              for (let i = 0; i <= highestIndex; i++) {
-                price += (config.gradeMarkups[gradesList[i]] || 0);
+                let price = ((group.avgPrice + (item.cp1Offset || 0)) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+
+                if (config.enableGradeMarkups && config.gradeMarkups) {
+                  const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+                  let highestIndex = -1;
+                  gradesList.forEach((g, idx) => { if (item.grade === g) highestIndex = idx; }); // Note: Simplified grade lookup for single item
+                  // Wait, grade markups are based on the grades present in the GROUP in the original logic.
+                  // But if we split, should we use the item's grade or the group's highest grade?
+                  // The user said "Split first, then markup". 
+                  // In the stage form, I used group.grades.
+                  let highestGradeInGroup = -1;
+                  gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
+                  
+                  if (highestGradeInGroup !== -1) {
+                    for (let i = 0; i <= highestGradeInGroup; i++) {
+                      price += (config.gradeMarkups[gradesList[i]] || 0);
+                    }
+                  }
+                }
+                grandTotal += Math.round(price) * item.quantity;
+              });
+            });
+          } else {
+            let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+
+            if (config.enableGradeMarkups && config.gradeMarkups) {
+              const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+              let highestIndex = -1;
+              gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
+              if (highestIndex !== -1) {
+                for (let i = 0; i <= highestIndex; i++) {
+                  price += (config.gradeMarkups[gradesList[i]] || 0);
+                }
               }
             }
+            finalPrice = Math.round(price);
+            grandTotal += finalPrice * group.qty;
           }
-          finalPrice = Math.round(price);
         }
-
-        grandTotal += finalPrice * group.qty;
       });
     });
 
@@ -256,21 +292,44 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
     let totalQty = 0;
     let totalValue = 0;
     Object.entries(groups).forEach(([key, group]) => {
-      let finalPrice: number;
       if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
-        finalPrice = config.rowOverrides[key];
+        totalValue += config.rowOverrides[key] * group.qty;
+        totalQty += group.qty;
       } else {
-        let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
-        if (config.enableGradeMarkups && config.gradeMarkups) {
-          const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-          let highestIndex = -1;
-          gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
-          if (highestIndex !== -1) for (let i = 0; i <= highestIndex; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
+        if (branch.toCompany === "CP-5") {
+          branchBoxes.forEach(box => {
+            box.items.forEach((item: any) => {
+              let iKey = "";
+              if (mode === "mixed") iKey = item.productName;
+              else if (mode === "separate") iKey = item.sku;
+              else if (mode === "premium-mixed") iKey = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
+              
+              if (iKey !== key) return;
+
+              let price = ((group.avgPrice + (item.cp1Offset || 0)) * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+              if (config.enableGradeMarkups && config.gradeMarkups) {
+                const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+                let highestGradeInGroup = -1;
+                gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestGradeInGroup = idx; });
+                if (highestGradeInGroup !== -1) for (let i = 0; i <= highestGradeInGroup; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
+              }
+              totalValue += Math.round(price) * item.quantity;
+              totalQty += item.quantity;
+            });
+          });
+        } else {
+          let price = (group.avgPrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+          if (config.enableGradeMarkups && config.gradeMarkups) {
+            const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+            let highestIndex = -1;
+            gradesList.forEach((g, idx) => { if (group.grades.has(g)) highestIndex = idx; });
+            if (highestIndex !== -1) for (let i = 0; i <= highestIndex; i++) price += (config.gradeMarkups[gradesList[i]] || 0);
+          }
+          const finalPrice = Math.round(price);
+          totalValue += finalPrice * group.qty;
+          totalQty += group.qty;
         }
-        finalPrice = Math.round(price);
       }
-      totalQty += group.qty;
-      totalValue += finalPrice * group.qty;
     });
     return { totalQty, totalValue };
   };

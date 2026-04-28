@@ -107,7 +107,14 @@ export async function POST(req: Request) {
       });
 
       const avgBasePrice = totalPriceSum / totalQty;
-      let price = (avgBasePrice * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
+      
+      // Apply Grade Splitting Offset for the final stage (CP-4 -> CP-5)
+      let baseWithOffset = avgBasePrice;
+      if (exportRecord.toCompany === "CP-5") {
+        baseWithOffset += (item.cp1Offset || 0);
+      }
+
+      let price = (baseWithOffset * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
       
       if (config.enableGradeMarkups && config.gradeMarkups) {
         const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
@@ -135,40 +142,48 @@ export async function POST(req: Request) {
         else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
         if (!groupData[key]) {
-          groupData[key] = { qty: 0, totalPriceSum: 0, grades: new Set<string>() };
+          groupData[key] = { qty: 0, totalPriceSum: 0, totalOffsetSum: 0, grades: new Set<string>() };
         }
         
         const basePriceForThisStage = getHistoricalPrice(item, fromCompany);
         
         groupData[key].qty += item.quantity;
         groupData[key].totalPriceSum += (basePriceForThisStage * item.quantity);
+        groupData[key].totalOffsetSum += ((item.cp1Offset || 0) * item.quantity);
         groupData[key].grades.add(item.grade);
       });
     });
 
-    const stagePrices: Record<string, number> = {};
+    // Pre-calculate group prices to ensure rounding matches the UI's aggregated view
+    const groupPrices: Record<string, number> = {};
     Object.entries(groupData).forEach(([key, data]) => {
-      const avgBasePrice = data.totalPriceSum / data.qty;
-      let finalPrice = 0;
       if (rowOverrides && rowOverrides[key] !== undefined) {
-        finalPrice = rowOverrides[key];
-      } else {
-        let priced = (avgBasePrice * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
-        if (enableGradeMarkups && gradeMarkups) {
-          const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-          let highestIndex = -1;
-          gradesList.forEach((g, idx) => {
-            if (data.grades.has(g)) highestIndex = idx;
-          });
-          if (highestIndex !== -1) {
-            for (let i = 0; i <= highestIndex; i++) {
-              priced += (gradeMarkups[gradesList[i]] || 0);
-            }
+        groupPrices[key] = rowOverrides[key];
+        return;
+      }
+
+      const avgBasePrice = data.totalPriceSum / data.qty;
+      const avgOffset = data.totalOffsetSum / data.qty;
+      
+      let base = avgBasePrice;
+      if (toCompany === "CP-5") {
+        base += avgOffset;
+      }
+
+      let priced = (base * (1 + (percentageMarkup / 100))) + flatMarkup;
+      if (enableGradeMarkups && gradeMarkups) {
+        const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+        let highestIndex = -1;
+        gradesList.forEach((g, idx) => {
+          if (data.grades.has(g)) highestIndex = idx;
+        });
+        if (highestIndex !== -1) {
+          for (let i = 0; i <= highestIndex; i++) {
+            priced += (gradeMarkups[gradesList[i]] || 0);
           }
         }
-        finalPrice = Math.round(priced);
       }
-      stagePrices[key] = finalPrice;
+      groupPrices[key] = Math.round(priced);
     });
 
     const csvRecords: any[] = [];
@@ -179,7 +194,7 @@ export async function POST(req: Request) {
         else if (configMode === "separate") key = item.sku;
         else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
-        const finalPrice = stagePrices[key];
+        let finalPrice = groupPrices[key] || 0;
 
         csvRecords.push({
           wioName: box.wioName,

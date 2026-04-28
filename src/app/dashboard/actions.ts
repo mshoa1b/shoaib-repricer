@@ -75,6 +75,18 @@ export async function uploadIngestionFile(formData: FormData) {
     });
   }
 
+  // Calculate offsets per product name across the entire ingestion
+  const productAverages = new Map<string, { totalValue: number, totalQty: number }>();
+  
+  for (const boxData of Array.from(boxesMap.values())) {
+    for (const item of boxData.items) {
+      const stats = productAverages.get(item.productName) || { totalValue: 0, totalQty: 0 };
+      stats.totalValue += item.cp1Price * item.quantity;
+      stats.totalQty += item.quantity;
+      productAverages.set(item.productName, stats);
+    }
+  }
+
   for (const [wioNumber, boxData] of Array.from(boxesMap.entries())) {
     const box = await prisma.box.create({
       data: {
@@ -85,6 +97,10 @@ export async function uploadIngestionFile(formData: FormData) {
     });
 
     for (const item of boxData.items) {
+      const stats = productAverages.get(item.productName);
+      const avg = stats && stats.totalQty > 0 ? stats.totalValue / stats.totalQty : item.cp1Price;
+      const offset = item.cp1Price - avg;
+
       await prisma.item.create({
         data: {
           boxId: box.id,
@@ -93,6 +109,7 @@ export async function uploadIngestionFile(formData: FormData) {
           grade: determineGrade(item.sku),
           quantity: item.quantity,
           cp1Price: item.cp1Price,
+          cp1Offset: offset,
         }
       });
     }
