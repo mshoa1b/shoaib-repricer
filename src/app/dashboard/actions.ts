@@ -201,3 +201,78 @@ export async function deleteBranch(id: string, cycleId: string) {
   revalidatePath(`/dashboard/cycle/${cycleId}`);
   return { success: true };
 }
+
+export async function updateBoxItems(boxId: string, items: any[]) {
+  const box = await prisma.box.findUnique({
+    where: { id: boxId },
+    select: { ingestionId: true }
+  });
+  if (!box) throw new Error("Box not found");
+
+  const ingestionId = box.ingestionId;
+
+  // 1. Update items in this box
+  await prisma.item.deleteMany({ where: { boxId } });
+  
+  for (const item of items) {
+    await prisma.item.create({
+      data: {
+        boxId,
+        productName: item.productName,
+        sku: item.sku,
+        grade: determineGrade(item.sku),
+        quantity: Number(item.quantity),
+        cp1Price: Number(item.cp1Price),
+      }
+    });
+  }
+
+  // 2. Recalculate offsets for the entire ingestion
+  const allItems = await prisma.item.findMany({
+    where: {
+      box: { ingestionId }
+    }
+  });
+
+  const productAverages = new Map<string, { totalValue: number, totalQty: number }>();
+  for (const item of allItems) {
+    const stats = productAverages.get(item.productName) || { totalValue: 0, totalQty: 0 };
+    stats.totalValue += item.cp1Price * item.quantity;
+    stats.totalQty += item.quantity;
+    productAverages.set(item.productName, stats);
+  }
+
+  for (const item of allItems) {
+    const stats = productAverages.get(item.productName);
+    const avg = stats && stats.totalQty > 0 ? stats.totalValue / stats.totalQty : item.cp1Price;
+    const offset = item.cp1Price - avg;
+    
+    await prisma.item.update({
+      where: { id: item.id },
+      data: { cp1Offset: offset }
+    });
+  }
+
+  revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/ingestion/${ingestionId}`);
+  return { success: true };
+}
+
+export async function deleteIngestion(id: string) {
+  const usedCount = await prisma.box.count({
+    where: {
+      ingestionId: id,
+      cycleId: { not: null }
+    }
+  });
+
+  if (usedCount > 0) {
+    return { success: false, error: "Cannot delete ingestion because some boxes are already assigned to a cycle." };
+  }
+
+  await (prisma as any).ingestion.delete({
+    where: { id }
+  });
+  revalidatePath("/dashboard");
+  return { success: true };
+}

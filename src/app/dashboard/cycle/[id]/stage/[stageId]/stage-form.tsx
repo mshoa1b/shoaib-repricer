@@ -6,6 +6,7 @@ import * as xlsx from "xlsx";
 
 interface Item {
   id: string;
+  boxId: string;
   productName: string;
   sku: string;
   grade: string;
@@ -202,11 +203,11 @@ export function StageConfigForm({
   const getHistoricalPrice = (item: Item, targetStage: string): number => {
     if (targetStage === "CP-2") return item.cp1Price;
 
-    const boxId = item.id; // Corrected to use item.id or find boxId
+    const boxId = item.boxId;
 
     if (targetStage === "CP-3") {
       const exportRecord = allExports.find(e => 
-        e.fromCompany === "CP-2" && e.toCompany === "CP-3" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxes.find(b => b.items.some(i => i.id === item.id))?.id)
+        e.fromCompany === "CP-2" && e.toCompany === "CP-3" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxId)
       );
       if (!exportRecord) return item.cp1Price;
       return calculatePriceForExport(item, "CP-2", exportRecord);
@@ -214,7 +215,7 @@ export function StageConfigForm({
 
     if (targetStage === "CP-4") {
       const exportRecord = allExports.find(e => 
-        e.fromCompany === "CP-3" && e.toCompany === "CP-4" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxes.find(b => b.items.some(i => i.id === item.id))?.id)
+        e.fromCompany === "CP-3" && e.toCompany === "CP-4" && e.invoiceBoxes.some((ib: any) => ib.boxId === boxId)
       );
       if (!exportRecord) return getHistoricalPrice(item, "CP-3");
       return calculatePriceForExport(item, "CP-3", exportRecord);
@@ -263,9 +264,9 @@ export function StageConfigForm({
 
     const avgBasePrice = totalPriceSum / totalQty;
     
-    // Apply Grade Splitting Offset for the final stage (CP-4 -> CP-5)
+    // Apply Grade Splitting Offset ONLY for the stage where it is being sold TO CP-5
     let baseWithOffset = avgBasePrice;
-    if (toCompany === "CP-5") {
+    if (exportRecord.toCompany === "CP-5") {
       baseWithOffset += (item.cp1Offset || 0);
     }
 
@@ -410,6 +411,47 @@ export function StageConfigForm({
   const totalValue = aggregatedItems.reduce((sum, item) => sum + (calculateRowPrice(item.avgPrice, item.key, item.avgOffset) * item.qty), 0);
   const totalProfit = aggregatedItems.reduce((sum, item) => sum + ((calculateRowPrice(item.avgPrice, item.key, item.avgOffset) - item.avgPrice) * item.qty), 0);
 
+  const downloadNUBTemplate = () => {
+    const nubGroups: Record<string, { qty: number, totalPrice: number }> = {};
+    
+    rawItems.forEach(item => {
+      let key = "";
+      if (configMode === "mixed") key = item.productName;
+      else if (configMode === "separate") key = item.sku;
+      else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
+      
+      const lastStagePrice = getHistoricalPrice(item, fromCompany) || 0;
+      const finalUnitPrice = calculateRowPrice(lastStagePrice, key, item.cp1Offset);
+      
+      if (!nubGroups[item.productName]) {
+        nubGroups[item.productName] = { qty: 0, totalPrice: 0 };
+      }
+      nubGroups[item.productName].qty += item.quantity;
+      nubGroups[item.productName].totalPrice += (finalUnitPrice * item.quantity);
+    });
+
+    const data = Object.entries(nubGroups)
+      .map(([productName, group]) => {
+        const unitPrice = parseFloat((group.totalPrice / group.qty).toFixed(2));
+        const totalPrice = parseFloat((group.qty * unitPrice).toFixed(2));
+        
+        return {
+          "Item Name": productName,
+          "Description": "Used - Mixed Grades",
+          "Qty": group.qty,
+          "Unit Price": unitPrice,
+          "Tax Scheme": "0.00",
+          "Total Price": totalPrice
+        };
+      })
+      .sort((a, b) => a["Item Name"].localeCompare(b["Item Name"]));
+
+    const ws = xlsx.utils.json_to_sheet(data);
+    const wb = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(wb, ws, "Template");
+    xlsx.writeFile(wb, `NUB_Template_${branchName || "export"}.xlsx`);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', margin: '0.5rem' }}>
       <div className="flex justify-between items-center bg-white/5 p-6 rounded-xl border border-white/10">
@@ -434,7 +476,16 @@ export function StageConfigForm({
           </div>
         </div>
 
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ flex: 1.5, display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
+          <button 
+            type="button" 
+            className="btn btn-secondary" 
+            style={{ padding: '0.6rem 1.5rem', whiteSpace: 'nowrap' }} 
+            disabled={selectedBoxIds.length === 0 || !branchName}
+            onClick={downloadNUBTemplate}
+          >
+            NUB Template
+          </button>
           <form action="/api/export" method="POST" className="m-0">
             <input type="hidden" name="cycleId" value={cycleId} />
             <input type="hidden" name="fromCompany" value={fromCompany} />

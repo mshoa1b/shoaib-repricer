@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { UploadForm } from "./upload-form";
+import { DeleteIngestionButton } from "./delete-ingestion-button";
 import Link from "next/link";
 
 export default async function DashboardPage() {
@@ -20,6 +21,17 @@ export default async function DashboardPage() {
       }
     }
   } as any);
+  
+  // Check if each ingestion is used (has boxes in cycles)
+  const ingestionsWithUsage = await Promise.all(ingestions.map(async (ing: any) => {
+    const usedCount = await prisma.box.count({
+      where: {
+        ingestionId: ing.id,
+        cycleId: { not: null }
+      }
+    });
+    return { ...ing, isUsed: usedCount > 0 };
+  }));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '3rem', marginTop: '2rem' }}>
@@ -44,22 +56,31 @@ export default async function DashboardPage() {
                   <th>Source Name</th>
                   <th>Date Uploaded</th>
                   <th className="text-center">Total Boxes</th>
+                  <th className="text-center">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {ingestions.length === 0 ? (
+                {ingestionsWithUsage.length === 0 ? (
                   <tr>
-                    <td colSpan={4} style={{ textAlign: 'center', padding: '4rem 0' }} className="text-secondary italic">
+                    <td colSpan={5} style={{ textAlign: 'center', padding: '4rem 0' }} className="text-secondary italic">
                       No ingestion batches found. Upload a file to start.
                     </td>
                   </tr>
                 ) : (
-                  ingestions.map((ing: any) => (
+                  ingestionsWithUsage.map((ing: any) => (
                     <tr key={ing.id}>
                       <td className="text-sm text-secondary font-mono">{ing.id.slice(-6)}</td>
                       <td style={{ fontWeight: 500 }}>{ing.name}</td>
                       <td>{new Date(ing.createdAt).toLocaleString()}</td>
                       <td className="text-center">{ing._count.boxes}</td>
+                      <td className="text-center">
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Link href={`/dashboard/ingestion/${ing.id}`} className="btn btn-secondary" style={{ padding: '0.4rem 1rem', fontSize: '0.75rem' }}>
+                            View Boxes
+                          </Link>
+                          <DeleteIngestionButton id={ing.id} isUsed={ing.isUsed} />
+                        </div>
+                      </td>
                     </tr>
                   ))
                 )}
