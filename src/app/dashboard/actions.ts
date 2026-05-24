@@ -276,3 +276,43 @@ export async function deleteIngestion(id: string) {
   revalidatePath("/dashboard");
   return { success: true };
 }
+
+export async function getMoreIngestions(skip: number, take: number) {
+  const ingestions = await (prisma as any).ingestion.findMany({
+    skip,
+    take,
+    orderBy: { createdAt: "desc" },
+    include: {
+      _count: {
+        select: { boxes: true }
+      }
+    }
+  });
+
+  const ingestionsWithUsage = await Promise.all(ingestions.map(async (ing: any) => {
+    const usedCount = await prisma.box.count({
+      where: {
+        ingestionId: ing.id,
+        cycleId: { not: null }
+      }
+    });
+    return { ...ing, isUsed: usedCount > 0 };
+  }));
+
+  return ingestionsWithUsage;
+}
+
+export async function getMoreCycles(skip: number, take: number) {
+  const cycles = await prisma.cycle.findMany({
+    skip,
+    take,
+    orderBy: { createdAt: "desc" },
+    include: {
+      _count: {
+        select: { boxes: true }
+      }
+    }
+  });
+
+  return cycles;
+}

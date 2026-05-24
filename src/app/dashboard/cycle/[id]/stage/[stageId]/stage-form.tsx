@@ -412,34 +412,23 @@ export function StageConfigForm({
   const totalProfit = aggregatedItems.reduce((sum, item) => sum + ((calculateRowPrice(item.avgPrice, item.key, item.avgOffset) - item.avgPrice) * item.qty), 0);
 
   const downloadNUBTemplate = () => {
-    const nubGroups: Record<string, { qty: number, totalPrice: number }> = {};
-    
-    rawItems.forEach(item => {
-      let key = "";
-      if (configMode === "mixed") key = item.productName;
-      else if (configMode === "separate") key = item.sku;
-      else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
-      
-      const lastStagePrice = getHistoricalPrice(item, fromCompany) || 0;
-      const finalUnitPrice = calculateRowPrice(lastStagePrice, key, item.cp1Offset);
-      
-      if (!nubGroups[item.productName]) {
-        nubGroups[item.productName] = { qty: 0, totalPrice: 0 };
-      }
-      nubGroups[item.productName].qty += item.quantity;
-      nubGroups[item.productName].totalPrice += (finalUnitPrice * item.quantity);
-    });
-
-    const data = Object.entries(nubGroups)
-      .map(([productName, group]) => {
-        const unitPrice = parseFloat((group.totalPrice / group.qty).toFixed(2));
-        const totalPrice = parseFloat((group.qty * unitPrice).toFixed(2));
+    const data = aggregatedItems
+      .map(item => {
+        const finalUnitPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
+        const totalPrice = parseFloat((item.qty * finalUnitPrice).toFixed(2));
         
+        let itemName = item.productName;
+        if (configMode === "separate") {
+          itemName = `${item.productName} - ${item.sku}`;
+        } else if (configMode === "premium-mixed") {
+          itemName = item.key.endsWith("_NON_PREMIUM") ? `${item.productName} (Non-Premium)` : `${item.productName} (Premium)`;
+        }
+
         return {
-          "Item Name": productName,
+          "Item Name": itemName,
           "Description": "Used - Mixed Grades",
-          "Qty": group.qty,
-          "Unit Price": unitPrice,
+          "Qty": item.qty,
+          "Unit Price": finalUnitPrice,
           "Tax Scheme": "0.00",
           "Total Price": totalPrice
         };
