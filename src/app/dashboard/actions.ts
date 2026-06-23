@@ -71,7 +71,7 @@ export async function uploadIngestionFile(formData: FormData) {
       productName: String(row["Product Name"] || row["ProductName"] || ""),
       sku: String(row["SKU"] || ""),
       quantity: Number(row["Quantity"] || row["Qty"] || 0),
-      cp1Price: Number(row["Ecosystem Sale"] || row["Price"] || row["Telecore Sale"] || 0),
+      cp1Price: Number(row["Purchase"] || row["Ecosystem Sale"] || row["Price"] || row["Telecore Sale"] || 0),
     });
   }
 
