@@ -1,8 +1,25 @@
 "use client";
-
 import { useState, useMemo, useEffect, useRef } from "react";
 import { saveStageConfiguration } from "../../../../actions";
 import * as xlsx from "xlsx";
+
+function getBaseSku(sku: string): string {
+  const upper = sku.toUpperCase();
+  if (upper.endsWith("-A") || upper.endsWith("-G") || upper.endsWith("-B") || upper.endsWith("-P")) {
+    return sku.substring(0, sku.length - 2);
+  }
+  return sku;
+}
+
+function determineGrade(sku: string): string {
+  const upperSku = sku.toUpperCase();
+  const firstPart = upperSku.split("-")[0] || "";
+  if (upperSku.endsWith("-P") || upperSku.includes("PR-") || firstPart.includes("PPR")) return "Premium";
+  if (upperSku.endsWith("-A")) return "A Grade";
+  if (upperSku.endsWith("-G")) return "G Grade";
+  if (upperSku.endsWith("-B")) return "B Grade";
+  return "Unknown";
+}
 
 interface Item {
   id: string;
@@ -54,8 +71,9 @@ export function StageConfigForm({
   const [flatMarkup, setFlatMarkup] = useState(initialMarkupConfig.flatMarkup || 0);
 
   const [enableGradeMarkups, setEnableGradeMarkups] = useState(initialMarkupConfig.enableGradeMarkups || false);
+  const [enableEctonGrading, setEnableEctonGrading] = useState(initialMarkupConfig.enableEctonGrading || false);
   const [gradeMarkups, setGradeMarkups] = useState<Record<string, number>>(
-    initialMarkupConfig.gradeMarkups || { "A Grade": 0, "B Grade": 0, "G Grade": 0, "Premium": 0 }
+    initialMarkupConfig.gradeMarkups || { "Premium": 0, "A Grade": 0, "G Grade": 0, "B Grade": 0 }
   );
   const [rowOverrides, setRowOverrides] = useState<Record<string, number>>(initialMarkupConfig.rowOverrides || {});
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(
@@ -68,7 +86,7 @@ export function StageConfigForm({
   );
   const [timeAgo, setTimeAgo] = useState<string>("");
   const [search, setSearch] = useState("");
-  const [sortField, setSortField] = useState<string | null>(null);
+  const [sortField, setSortField] = useState<string | null>("productName");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
 
   useEffect(() => {
@@ -112,7 +130,8 @@ export function StageConfigForm({
             flatMarkup, 
             enableGradeMarkups,
             gradeMarkups,
-            rowOverrides 
+            rowOverrides,
+            enableEctonGrading
           }),
           boxIds: selectedBoxIds
         });
@@ -142,7 +161,8 @@ export function StageConfigForm({
     gradeMarkups, 
     rowOverrides, 
     selectedBoxIds,
-    cycleId, fromCompany, toCompany, currentBranchId
+    cycleId, fromCompany, toCompany, currentBranchId,
+    enableEctonGrading
   ]);
   
   const handleBulkPriceUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -238,16 +258,17 @@ export function StageConfigForm({
     }
 
     const exportBoxIds = exportRecord.invoiceBoxes.map((ib: any) => ib.boxId);
-    const groupItems = boxes
+    const allExportItems = boxes
       .filter(b => exportBoxIds.includes(b.id))
-      .flatMap(b => b.items)
-      .filter(i => {
-        let iKey = "";
-        if (mode === "mixed") iKey = i.productName;
-        else if (mode === "separate") iKey = i.sku;
-        else if (mode === "premium-mixed") iKey = i.grade === "Premium" ? i.sku : `${i.productName}_NON_PREMIUM`;
-        return iKey === key;
-      });
+      .flatMap(b => b.items);
+
+    const groupItems = allExportItems.filter(i => {
+      let iKey = "";
+      if (mode === "mixed") iKey = i.productName;
+      else if (mode === "separate") iKey = i.sku;
+      else if (mode === "premium-mixed") iKey = i.grade === "Premium" ? i.sku : `${i.productName}_NON_PREMIUM`;
+      return iKey === key;
+    });
 
     if (groupItems.length === 0) return getHistoricalPrice(item, baseStage);
 
@@ -256,7 +277,32 @@ export function StageConfigForm({
     const gradesInGroup = new Set<string>();
 
     groupItems.forEach(gi => {
-      const giBasePrice = getHistoricalPrice(gi, baseStage);
+      let giBasePrice = getHistoricalPrice(gi, baseStage);
+      if (config.enableEctonGrading) {
+        const grade = gi.grade || determineGrade(gi.sku);
+        if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+          const baseSku = getBaseSku(gi.sku);
+          const peers = allExportItems.filter(p => {
+            const pGrade = p.grade || determineGrade(p.sku);
+            return getBaseSku(p.sku) === baseSku && (pGrade === "A Grade" || pGrade === "G Grade" || pGrade === "B Grade");
+          });
+          let originalTotalVal = 0;
+          let ectonDenominator = 0;
+          peers.forEach(p => {
+            const pGrade = p.grade || determineGrade(p.sku);
+            originalTotalVal += getHistoricalPrice(p, baseStage) * p.quantity;
+            if (pGrade === "A Grade") ectonDenominator += 1.08 * p.quantity;
+            else if (pGrade === "G Grade") ectonDenominator += 1.00 * p.quantity;
+            else if (pGrade === "B Grade") ectonDenominator += 0.90 * p.quantity;
+          });
+          if (ectonDenominator > 0) {
+            const baselinePrice = originalTotalVal / ectonDenominator;
+            if (grade === "A Grade") giBasePrice = baselinePrice * 1.08;
+            else if (grade === "G Grade") giBasePrice = baselinePrice * 1.00;
+            else if (grade === "B Grade") giBasePrice = baselinePrice * 0.90;
+          }
+        }
+      }
       totalPriceSum += (giBasePrice * gi.quantity);
       totalQty += gi.quantity;
       gradesInGroup.add(gi.grade);
@@ -267,7 +313,8 @@ export function StageConfigForm({
     // Apply Grade Splitting Offset ONLY for the stage where it is being sold TO CP-5
     let baseWithOffset = avgBasePrice;
     if (exportRecord.toCompany === "CP-5") {
-      baseWithOffset += (item.cp1Offset || 0);
+      const applyOffset = config.enableEctonGrading ? 0 : (item.cp1Offset || 0);
+      baseWithOffset += applyOffset;
     }
 
     let price = (baseWithOffset * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
@@ -295,25 +342,77 @@ export function StageConfigForm({
       .flatMap(b => b.items);
   }, [boxes, selectedBoxIds]);
 
-  const aggregatedItems = useMemo(() => {
-    const groups: Record<string, { productName: string, sku: string, qty: number, totalPrice: number, totalOffset: number, grades: Set<string> }> = {};
+  const rawItemsWithEcton = useMemo(() => {
+    const itemsWithPrices = rawItems.map(item => ({
+      item,
+      rawPrice: getHistoricalPrice(item, fromCompany) || 0,
+    }));
 
-    rawItems.forEach(item => {
+    if (!enableEctonGrading) {
+      return itemsWithPrices.map(x => ({ ...x.item, basePrice: x.rawPrice }));
+    }
+
+    const baseSkuStats: Record<string, { originalTotalValue: number; ectonDenominator: number }> = {};
+    itemsWithPrices.forEach(({ item, rawPrice }) => {
+      const grade = item.grade || determineGrade(item.sku);
+      if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+        const baseSku = getBaseSku(item.sku);
+        if (!baseSkuStats[baseSku]) {
+          baseSkuStats[baseSku] = { originalTotalValue: 0, ectonDenominator: 0 };
+        }
+        baseSkuStats[baseSku].originalTotalValue += rawPrice * item.quantity;
+        if (grade === "A Grade") {
+          baseSkuStats[baseSku].ectonDenominator += 1.08 * item.quantity;
+        } else if (grade === "G Grade") {
+          baseSkuStats[baseSku].ectonDenominator += 1.00 * item.quantity;
+        } else if (grade === "B Grade") {
+          baseSkuStats[baseSku].ectonDenominator += 0.90 * item.quantity;
+        }
+      }
+    });
+
+    return itemsWithPrices.map(({ item, rawPrice }) => {
+      const grade = item.grade || determineGrade(item.sku);
+      let basePrice = rawPrice;
+      if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+        const baseSku = getBaseSku(item.sku);
+        const stats = baseSkuStats[baseSku];
+        if (stats && stats.ectonDenominator > 0) {
+          const baselinePrice = stats.originalTotalValue / stats.ectonDenominator;
+          if (grade === "A Grade") basePrice = baselinePrice * 1.08;
+          else if (grade === "G Grade") basePrice = baselinePrice * 1.00;
+          else if (grade === "B Grade") basePrice = baselinePrice * 0.90;
+        }
+      }
+      return {
+        ...item,
+        basePrice,
+        cp1Offset: enableEctonGrading ? 0 : item.cp1Offset
+      };
+    });
+  }, [rawItems, enableEctonGrading, fromCompany, allExports, boxes]);
+
+  const aggregatedItems = useMemo(() => {
+    const groups: Record<string, { productName: string, sku: string, qty: number, totalPrice: number, originalTotalPrice: number, totalOffset: number, grades: Set<string> }> = {};
+
+    rawItemsWithEcton.forEach(item => {
       let key = "";
       if (configMode === "mixed") key = item.productName;
       else if (configMode === "separate") key = item.sku;
       else if (configMode === "premium-mixed") key = item.grade === "Premium" ? item.sku : `${item.productName}_NON_PREMIUM`;
 
       if (!groups[key]) {
-        groups[key] = { productName: item.productName, sku: item.sku, qty: 0, totalPrice: 0, totalOffset: 0, grades: new Set() };
+        groups[key] = { productName: item.productName, sku: item.sku, qty: 0, totalPrice: 0, originalTotalPrice: 0, totalOffset: 0, grades: new Set() };
       }
 
       const group = groups[key];
-      const lastStagePrice = getHistoricalPrice(item, fromCompany) || 0;
+      const lastStagePrice = item.basePrice || 0;
+      const originalPrice = getHistoricalPrice(item, fromCompany) || 0;
       
       const newQty = group.qty + item.quantity;
       if (newQty > 0) {
         group.totalPrice = (group.totalPrice * group.qty + lastStagePrice * item.quantity) / newQty;
+        group.originalTotalPrice = (group.originalTotalPrice * group.qty + originalPrice * item.quantity) / newQty;
         group.totalOffset = (group.totalOffset * group.qty + (item.cp1Offset || 0) * item.quantity) / newQty;
       }
       group.qty = newQty;
@@ -324,9 +423,10 @@ export function StageConfigForm({
       key,
       ...data,
       avgPrice: data.totalPrice || 0,
+      originalAvgPrice: data.originalTotalPrice || 0,
       avgOffset: data.totalOffset || 0
     }));
-  }, [rawItems, configMode, fromCompany, allExports, boxes]);
+  }, [rawItemsWithEcton, configMode, fromCompany, allExports, boxes]);
 
   const displayItems = useMemo(() => {
     let result = [...aggregatedItems].filter(item => 
@@ -346,6 +446,17 @@ export function StageConfigForm({
         }
 
         if (typeof valA === "string" && typeof valB === "string") {
+          if (sortField === "productName" && valA === valB) {
+            const customGradeOrder = ["Premium", "A Grade", "G Grade", "B Grade", "Unknown"];
+            const getGradeIndex = (item: any) => {
+              const grade = item.grades.size === 1 ? (Array.from(item.grades)[0] as string) : determineGrade(item.sku);
+              const idx = customGradeOrder.indexOf(grade);
+              return idx === -1 ? 99 : idx;
+            };
+            const gradeIdxA = getGradeIndex(a);
+            const gradeIdxB = getGradeIndex(b);
+            return sortOrder === "asc" ? gradeIdxA - gradeIdxB : gradeIdxB - gradeIdxA;
+          }
           return sortOrder === "asc" 
             ? valA.localeCompare(valB)
             : valB.localeCompare(valA);
@@ -487,7 +598,8 @@ export function StageConfigForm({
               flatMarkup, 
               enableGradeMarkups, 
               gradeMarkups, 
-              rowOverrides 
+              rowOverrides,
+              enableEctonGrading
             })} />
             <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 2rem' }} disabled={selectedBoxIds.length === 0 || !branchName}>
               Export CSV
@@ -556,7 +668,7 @@ export function StageConfigForm({
             />
           </div>
 
-          <div style={{ flex: '2', minWidth: '300px' }}>
+          <div style={{ flex: '1.5', minWidth: '220px' }}>
             <div 
               className="flex items-center gap-3" 
               onClick={() => setEnableGradeMarkups(!enableGradeMarkups)}
@@ -586,11 +698,42 @@ export function StageConfigForm({
               </label>
             </div>
           </div>
+
+          <div style={{ flex: '1.5', minWidth: '220px' }}>
+            <div 
+              className="flex items-center gap-3" 
+              onClick={() => setEnableEctonGrading(!enableEctonGrading)}
+              style={{ cursor: 'pointer', userSelect: 'none', background: 'rgba(255,255,255,0.03)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}
+            >
+              <div style={{
+                width: '32px',
+                height: '16px',
+                background: enableEctonGrading ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)',
+                borderRadius: '16px',
+                position: 'relative',
+                transition: 'all 0.3s ease'
+              }}>
+                <div style={{
+                  width: '12px',
+                  height: '12px',
+                  background: 'white',
+                  borderRadius: '50%',
+                  position: 'absolute',
+                  top: '2px',
+                  left: enableEctonGrading ? '18px' : '2px',
+                  transition: 'all 0.3s ease'
+                }} />
+              </div>
+              <label className="info-label" style={{ margin: 0, fontSize: '0.8rem', cursor: 'pointer', textTransform: 'none', fontWeight: 600 }}>
+                Enable Ecton Grading
+              </label>
+            </div>
+          </div>
         </div>
 
         {enableGradeMarkups && (
           <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginTop: '1rem', animation: 'fadeIn 0.3s ease' }}>
-            {["B Grade", "G Grade", "A Grade", "Premium"].map(grade => (
+            {["Premium", "A Grade", "G Grade", "B Grade"].map(grade => (
               <div key={grade} style={{ flex: 1, minWidth: '150px', background: 'rgba(255,255,255,0.02)', padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
                 <label className="info-label" style={{ color: 'var(--accent-primary)', marginBottom: '0.25rem', fontSize: '0.65rem' }}>{grade}</label>
                 <div className="flex items-center gap-1">
@@ -679,25 +822,78 @@ export function StageConfigForm({
             <tbody>
               {displayItems.map(item => {
                 const finalPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
+
+                // Exceeds premium warning logic
+                let exceedsPremium = false;
+                let premiumGapTooSmall = false;
+                let premiumPrice = 0;
+                let priceDifference = 0;
+                const itemGrade = item.grades.size === 1 ? Array.from(item.grades)[0] : determineGrade(item.sku);
+                if (itemGrade && ["A Grade", "G Grade", "B Grade"].includes(itemGrade)) {
+                  const baseSku = getBaseSku(item.sku);
+                  const premiumGroups = aggregatedItems.filter(g => {
+                    return g.grades.has("Premium") && g.productName === item.productName;
+                  });
+                  let minPremiumPrice = Infinity;
+                  let hasPremium = false;
+                  premiumGroups.forEach(g => {
+                    const pPrice = calculateRowPrice(g.avgPrice, g.key, g.avgOffset);
+                    if (pPrice < minPremiumPrice) {
+                      minPremiumPrice = pPrice;
+                      hasPremium = true;
+                    }
+                  });
+                  if (hasPremium) {
+                    premiumPrice = minPremiumPrice;
+                    priceDifference = premiumPrice - finalPrice;
+                    if (finalPrice > premiumPrice) {
+                      exceedsPremium = true;
+                    } else if (priceDifference < 10) {
+                      premiumGapTooSmall = true;
+                    }
+                  }
+                }
+
                 return (
                   <tr key={item.key}>
                     <td className="text-center" style={{ padding: '0.75rem 1rem' }}>
                       <div style={{ fontWeight: 600 }}>{item.productName}</div>
-                      <div className="text-xs text-secondary">{Array.from(item.grades).sort().join(", ")}</div>
+                      <div className="text-xs text-secondary">
+                        {Array.from(item.grades)
+                          .sort((a, b) => {
+                            const order = ["Premium", "A Grade", "G Grade", "B Grade"];
+                            return order.indexOf(a) - order.indexOf(b);
+                          })
+                          .join(", ")}
+                      </div>
                     </td>
                     <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem' }}>
                       {configMode === "mixed" ? "MIXED" : item.sku}
                     </td>
                     <td className="text-center" style={{ fontWeight: 600 }}>{item.qty}</td>
-                    <td className="font-mono text-secondary text-center">€{item.avgPrice.toFixed(2)}</td>
+                    <td className="font-mono text-center">
+                      <div className="text-secondary" style={{ fontSize: '0.85rem' }}>
+                        €{item.originalAvgPrice.toFixed(2)}
+                      </div>
+                      {enableEctonGrading && (item.avgPrice !== item.originalAvgPrice) && (
+                        <div style={{ color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px' }}>
+                          &rarr; €{item.avgPrice.toFixed(2)}
+                        </div>
+                      )}
+                    </td>
                     <td className="text-center">
                       <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.85rem' }}>
                         {rowOverrides[item.key] !== undefined ? (
                           <span style={{ color: 'var(--accent-primary)' }}>
-                            +€{(rowOverrides[item.key] - item.avgPrice).toFixed(2)} (Manual)
+                            +€{(rowOverrides[item.key] - item.originalAvgPrice).toFixed(2)} (Manual)
                           </span>
                         ) : (
                           <>
+                            {enableEctonGrading && (item.avgPrice - item.originalAvgPrice) !== 0 && (
+                              <span style={{ color: (item.avgPrice - item.originalAvgPrice) > 0 ? '#ff8c00' : '#ff5555', fontSize: '0.75rem' }}>
+                                {(item.avgPrice - item.originalAvgPrice) > 0 ? '+' : ''}€{(item.avgPrice - item.originalAvgPrice).toFixed(2)} Ecton Grading
+                              </span>
+                            )}
                             {(item.avgOffset !== 0 && toCompany === "CP-5") && (
                               <span style={{ color: item.avgOffset > 0 ? 'var(--accent-primary)' : '#ff5555', fontSize: '0.75rem' }}>
                                 {item.avgOffset > 0 ? '+' : ''}€{item.avgOffset.toFixed(2)} Grade Split
@@ -714,11 +910,21 @@ export function StageConfigForm({
                       </div>
                     </td>
                     <td style={{ padding: '0.5rem' }} className="text-center">
-                      <div className="flex justify-center">
+                      <div className="flex flex-col items-center justify-center">
                         <ManualPriceInput
                           initialValue={finalPrice}
                           onSave={(val) => setRowOverrides({ ...rowOverrides, [item.key]: val })}
                         />
+                        {exceedsPremium && (
+                          <div style={{ color: '#ff5555', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                            ⚠️ Exceeds Premium (€{premiumPrice.toFixed(2)})
+                          </div>
+                        )}
+                        {premiumGapTooSmall && (
+                          <div style={{ color: '#ff8c00', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                            ⚠️ Premium Gap &lt; €10 (€{priceDifference.toFixed(2)})
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
