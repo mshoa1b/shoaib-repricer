@@ -2,6 +2,24 @@ import { prisma } from "@/lib/prisma";
 import { NextResponse } from "next/server";
 import { createObjectCsvStringifier } from "csv-writer";
 
+function getBaseSku(sku: string): string {
+  const upper = sku.toUpperCase();
+  if (upper.endsWith("-A") || upper.endsWith("-G") || upper.endsWith("-B") || upper.endsWith("-P")) {
+    return sku.substring(0, sku.length - 2);
+  }
+  return sku;
+}
+
+function determineGrade(sku: string): string {
+  const upperSku = sku.toUpperCase();
+  const firstPart = upperSku.split("-")[0] || "";
+  if (upperSku.endsWith("-P") || upperSku.includes("PR-") || firstPart.includes("PPR")) return "Premium";
+  if (upperSku.endsWith("-A")) return "A Grade";
+  if (upperSku.endsWith("-G")) return "G Grade";
+  if (upperSku.endsWith("-B")) return "B Grade";
+  return "Unknown";
+}
+
 export async function POST(req: Request) {
   try {
     const formData = await req.formData();
@@ -12,7 +30,7 @@ export async function POST(req: Request) {
     const configMode = formData.get("configMode") as string;
     const markupConfig = JSON.parse(formData.get("markupConfig") as string);
 
-    const { percentageMarkup, flatMarkup, enableGradeMarkups, gradeMarkups, rowOverrides } = markupConfig;
+    const { percentageMarkup, flatMarkup, enableGradeMarkups, gradeMarkups, rowOverrides, enableEctonGrading } = markupConfig;
 
     const cycle = await prisma.cycle.findUnique({
       where: { id: cycleId },
@@ -23,6 +41,13 @@ export async function POST(req: Request) {
     });
 
     if (!cycle) return NextResponse.json({ error: "Cycle not found" }, { status: 404 });
+
+    // Dynamically overwrite grade for all items using the latest classification rules
+    cycle.boxes.forEach(box => {
+      box.items.forEach(item => {
+        item.grade = determineGrade(item.sku);
+      });
+    });
 
     const allExports = cycle.exports;
     const allBoxes = cycle.boxes;
@@ -82,16 +107,17 @@ export async function POST(req: Request) {
       }
 
       const exportBoxIds = exportRecord.invoiceBoxes.map((ib: any) => ib.boxId);
-      const groupItems = allBoxes
+      const allExportItems = allBoxes
         .filter(b => exportBoxIds.includes(b.id))
-        .flatMap(b => b.items)
-        .filter(i => {
-          let iKey = "";
-          if (mode === "mixed") iKey = i.productName;
-          else if (mode === "separate") iKey = i.sku;
-          else if (mode === "premium-mixed") iKey = i.grade === "Premium" ? i.sku : `${i.productName}_NON_PREMIUM`;
-          return iKey === key;
-        });
+        .flatMap(b => b.items);
+
+      const groupItems = allExportItems.filter(i => {
+        let iKey = "";
+        if (mode === "mixed") iKey = i.productName;
+        else if (mode === "separate") iKey = i.sku;
+        else if (mode === "premium-mixed") iKey = i.grade === "Premium" ? i.sku : `${i.productName}_NON_PREMIUM`;
+        return iKey === key;
+      });
 
       if (groupItems.length === 0) return getHistoricalPrice(item, baseStage);
 
@@ -100,7 +126,32 @@ export async function POST(req: Request) {
       const gradesInGroup = new Set<string>();
 
       groupItems.forEach(gi => {
-        const giBasePrice = getHistoricalPrice(gi, baseStage);
+        let giBasePrice = getHistoricalPrice(gi, baseStage);
+        if (config.enableEctonGrading) {
+          const grade = gi.grade || determineGrade(gi.sku);
+          if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+            const baseSku = getBaseSku(gi.sku);
+            const peers = allExportItems.filter(p => {
+              const pGrade = p.grade || determineGrade(p.sku);
+              return getBaseSku(p.sku) === baseSku && (pGrade === "A Grade" || pGrade === "G Grade" || pGrade === "B Grade");
+            });
+            let originalTotalVal = 0;
+            let ectonDenominator = 0;
+            peers.forEach(p => {
+              const pGrade = p.grade || determineGrade(p.sku);
+              originalTotalVal += getHistoricalPrice(p, baseStage) * p.quantity;
+              if (pGrade === "A Grade") ectonDenominator += 1.08 * p.quantity;
+              else if (pGrade === "G Grade") ectonDenominator += 1.00 * p.quantity;
+              else if (pGrade === "B Grade") ectonDenominator += 0.90 * p.quantity;
+            });
+            if (ectonDenominator > 0) {
+              const baselinePrice = originalTotalVal / ectonDenominator;
+              if (grade === "A Grade") giBasePrice = baselinePrice * 1.08;
+              else if (grade === "G Grade") giBasePrice = baselinePrice * 1.00;
+              else if (grade === "B Grade") giBasePrice = baselinePrice * 0.90;
+            }
+          }
+        }
         totalPriceSum += (giBasePrice * gi.quantity);
         totalQty += gi.quantity;
         gradesInGroup.add(gi.grade);
@@ -111,7 +162,8 @@ export async function POST(req: Request) {
       // Apply Grade Splitting Offset for the final stage (CP-4 -> CP-5)
       let baseWithOffset = avgBasePrice;
       if (exportRecord.toCompany === "CP-5") {
-        baseWithOffset += (item.cp1Offset || 0);
+        const applyOffset = config.enableEctonGrading ? 0 : (item.cp1Offset || 0);
+        baseWithOffset += applyOffset;
       }
 
       let price = (baseWithOffset * (1 + (config.percentageMarkup || 0) / 100)) + (config.flatMarkup || 0);
@@ -132,6 +184,49 @@ export async function POST(req: Request) {
     };
 
     const currentBoxIds = boxIds;
+    const currentItems = allBoxes.filter(b => currentBoxIds.includes(b.id)).flatMap(b => b.items);
+
+    const ectonAdjustedPrices = new Map<string, number>();
+    if (enableEctonGrading) {
+      const baseSkuStats: Record<string, { originalTotalValue: number; ectonDenominator: number }> = {};
+      
+      currentItems.forEach(item => {
+        const rawPrice = getHistoricalPrice(item, fromCompany);
+        const grade = item.grade || determineGrade(item.sku);
+        if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+          const baseSku = getBaseSku(item.sku);
+          if (!baseSkuStats[baseSku]) {
+            baseSkuStats[baseSku] = { originalTotalValue: 0, ectonDenominator: 0 };
+          }
+          baseSkuStats[baseSku].originalTotalValue += rawPrice * item.quantity;
+          if (grade === "A Grade") {
+            baseSkuStats[baseSku].ectonDenominator += 1.08 * item.quantity;
+          } else if (grade === "G Grade") {
+            baseSkuStats[baseSku].ectonDenominator += 1.00 * item.quantity;
+          } else if (grade === "B Grade") {
+            baseSkuStats[baseSku].ectonDenominator += 0.90 * item.quantity;
+          }
+        }
+      });
+      
+      currentItems.forEach(item => {
+        const rawPrice = getHistoricalPrice(item, fromCompany);
+        const grade = item.grade || determineGrade(item.sku);
+        let basePrice = rawPrice;
+        if (grade === "A Grade" || grade === "G Grade" || grade === "B Grade") {
+          const baseSku = getBaseSku(item.sku);
+          const stats = baseSkuStats[baseSku];
+          if (stats && stats.ectonDenominator > 0) {
+            const baselinePrice = stats.originalTotalValue / stats.ectonDenominator;
+            if (grade === "A Grade") basePrice = baselinePrice * 1.08;
+            else if (grade === "G Grade") basePrice = baselinePrice * 1.00;
+            else if (grade === "B Grade") basePrice = baselinePrice * 0.90;
+          }
+        }
+        ectonAdjustedPrices.set(item.id, basePrice);
+      });
+    }
+
     const groupData: Record<string, { qty: number, totalPriceSum: number, totalOffsetSum: number, grades: Set<string> }> = {};
     
     allBoxes.filter(b => currentBoxIds.includes(b.id)).forEach(box => {
@@ -145,11 +240,12 @@ export async function POST(req: Request) {
           groupData[key] = { qty: 0, totalPriceSum: 0, totalOffsetSum: 0, grades: new Set<string>() };
         }
         
-        const basePriceForThisStage = getHistoricalPrice(item, fromCompany);
+        const basePriceForThisStage = enableEctonGrading ? (ectonAdjustedPrices.get(item.id) || 0) : getHistoricalPrice(item, fromCompany);
         
         groupData[key].qty += item.quantity;
         groupData[key].totalPriceSum += (basePriceForThisStage * item.quantity);
-        groupData[key].totalOffsetSum += (((item as any).cp1Offset || 0) * item.quantity);
+        const itemOffset = enableEctonGrading ? 0 : ((item as any).cp1Offset || 0);
+        groupData[key].totalOffsetSum += (itemOffset * item.quantity);
         groupData[key].grades.add(item.grade);
       });
     });

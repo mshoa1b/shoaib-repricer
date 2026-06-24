@@ -29,7 +29,8 @@ import { revalidatePath } from "next/cache";
 
 function determineGrade(sku: string): string {
   const upperSku = sku.toUpperCase();
-  if (upperSku.endsWith("-P") || upperSku.includes("PR-")) return "Premium";
+  const firstPart = upperSku.split("-")[0] || "";
+  if (upperSku.endsWith("-P") || upperSku.includes("PR-") || firstPart.includes("PPR")) return "Premium";
   if (upperSku.endsWith("-A")) return "A Grade";
   if (upperSku.endsWith("-G")) return "G Grade";
   if (upperSku.endsWith("-B")) return "B Grade";
