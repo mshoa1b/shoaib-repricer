@@ -428,6 +428,63 @@ export function StageConfigForm({
     }));
   }, [rawItemsWithEcton, configMode, fromCompany, allExports, boxes]);
 
+  const prevBranchData = useMemo(() => {
+    if (fromCompany !== "CP-4" || toCompany !== "CP-5") return {};
+
+    // 1. Get all other CP-4 -> CP-5 branches, sorted by createdAt descending
+    const otherBranches = allExports
+      .filter(e => e.fromCompany === "CP-4" && e.toCompany === "CP-5" && e.id !== currentBranchId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const result: Record<string, { price: number; branchId: string; branchName: string }> = {};
+
+    // 2. Map boxes to their items for efficient lookup
+    const boxMap = new Map<string, Item[]>();
+    boxes.forEach(b => {
+      boxMap.set(b.id, b.items);
+    });
+
+    // 3. For each branch, get all its items
+    const branchItemsMap = new Map<string, Item[]>();
+    otherBranches.forEach(branch => {
+      const branchBoxIds = branch.invoiceBoxes.map((ib: any) => ib.boxId);
+      const items: Item[] = [];
+      branchBoxIds.forEach((boxId: string) => {
+        const boxItems = boxMap.get(boxId);
+        if (boxItems) {
+          items.push(...boxItems);
+        }
+      });
+      branchItemsMap.set(branch.id, items);
+    });
+
+    // 4. For each unique SKU in the current cycle, find the latest branch that has it
+    const allSkus = new Set<string>();
+    boxes.forEach(b => b.items.forEach(i => allSkus.add(i.sku)));
+
+    allSkus.forEach(sku => {
+      const matchingBranch = otherBranches.find(branch => {
+        const items = branchItemsMap.get(branch.id);
+        return items?.some(i => i.sku === sku);
+      });
+
+      if (matchingBranch) {
+        const items = branchItemsMap.get(matchingBranch.id);
+        const itemInBranch = items?.find(i => i.sku === sku);
+        if (itemInBranch) {
+          const price = calculatePriceForExport(itemInBranch, "CP-4", matchingBranch);
+          result[sku] = {
+            price,
+            branchId: matchingBranch.id,
+            branchName: matchingBranch.branchName || "Unnamed Branch"
+          };
+        }
+      }
+    });
+
+    return result;
+  }, [fromCompany, toCompany, allExports, currentBranchId, boxes]);
+
   const displayItems = useMemo(() => {
     let result = [...aggregatedItems].filter(item => 
       item.productName.toLowerCase().includes(search.toLowerCase()) ||
@@ -816,6 +873,12 @@ export function StageConfigForm({
                 <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("qty")}>Qty <SortIcon field="qty" /></th>
                 <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("avgPrice")}>Avg Last Stage <SortIcon field="avgPrice" /></th>
                 <th className="text-center">Added Value</th>
+                {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                  <>
+                    <th className="text-center">Prev Branch</th>
+                    <th style={{ width: '50px' }}></th>
+                  </>
+                )}
                 <th className="text-center" style={{ width: '200px', cursor: 'pointer' }} onClick={() => toggleSort("currentPrice")}>Current Stage (€) <SortIcon field="currentPrice" /></th>
               </tr>
             </thead>
@@ -909,6 +972,68 @@ export function StageConfigForm({
                         )}
                       </div>
                     </td>
+                    {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                      <>
+                        <td className="text-center font-mono" style={{ padding: '0.75rem 1rem' }}>
+                          {prevBranchData[item.sku] ? (
+                            <div className="prev-branch-container">
+                              <span className="prev-branch-price">€{prevBranchData[item.sku].price.toFixed(2)}</span>
+                              <div className="prev-branch-popover">
+                                <a
+                                  href={`/dashboard/cycle/${cycleId}/stage/cp4-cp5/${prevBranchData[item.sku].branchId}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="prev-branch-popover-link"
+                                >
+                                  View Branch: {prevBranchData[item.sku].branchName} ↗
+                                </a>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-secondary">—</span>
+                          )}
+                        </td>
+                        <td className="text-center" style={{ padding: '0.75rem 0.5rem', verticalAlign: 'middle' }}>
+                          {prevBranchData[item.sku] && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRowOverrides(prev => ({
+                                  ...prev,
+                                  [item.key]: prevBranchData[item.sku].price
+                                }));
+                              }}
+                              className="btn btn-secondary"
+                              style={{
+                                padding: '0.2rem 0.4rem',
+                                fontSize: '0.8rem',
+                                borderRadius: '6px',
+                                border: '1px solid var(--border-subtle)',
+                                cursor: 'pointer',
+                                background: 'rgba(255, 255, 255, 0.03)',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                color: 'var(--accent-primary)',
+                                transition: 'all 0.2s ease',
+                                margin: 0
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background = 'var(--accent-primary)';
+                                e.currentTarget.style.color = 'white';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
+                                e.currentTarget.style.color = 'var(--accent-primary)';
+                              }}
+                              title="Copy previous stage value to current stage"
+                            >
+                              &rarr;
+                            </button>
+                          )}
+                        </td>
+                      </>
+                    )}
                     <td style={{ padding: '0.5rem' }} className="text-center">
                       <div className="flex flex-col items-center justify-center">
                         <ManualPriceInput
@@ -932,13 +1057,13 @@ export function StageConfigForm({
               })}
               {aggregatedItems.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="text-center py-20 text-secondary">
+                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 8 : 6} className="text-center py-20 text-secondary">
                     Select source inventory to calculate prices.
                   </td>
                 </tr>
               ) : displayItems.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="text-center py-20 text-secondary">
+                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 8 : 6} className="text-center py-20 text-secondary">
                     No items match your search "{search}".
                   </td>
                 </tr>
@@ -953,6 +1078,12 @@ export function StageConfigForm({
                   <td className="text-center" style={{ padding: '1rem', color: 'var(--accent-primary)' }}>
                     +€{totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </td>
+                  {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                    <>
+                      <td></td>
+                      <td></td>
+                    </>
+                  )}
                   <td className="text-center" style={{ padding: '1rem', fontSize: '1.1rem' }}>€{totalValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
               </tfoot>

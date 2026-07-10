@@ -359,3 +359,58 @@ input[type=number] {
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 112, 243, 0.3) rgba(255, 255, 255, 0.02);
 }
+
+/* Prev Branch tooltip container */
+.prev-branch-container {
+  position: relative;
+  display: inline-block;
+}
+
+.prev-branch-price {
+  cursor: pointer;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.3);
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.prev-branch-price:hover {
+  color: var(--accent-primary);
+  border-bottom-color: var(--accent-primary);
+}
+
+.prev-branch-popover {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding-bottom: 8px; /* Bridge gap for smooth hover transitions */
+  z-index: 50;
+  transition: opacity 0.2s, visibility 0.2s;
+}
+
+.prev-branch-popover-link {
+  display: block;
+  background: #1e293b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  color: var(--accent-primary) !important;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+  font-weight: 500;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.prev-branch-popover-link:hover {
+  background: #334155;
+  color: #60a5fa !important;
+}
+
+.prev-branch-container:hover .prev-branch-popover {
+  visibility: visible;
+  opacity: 1;
+}
+
