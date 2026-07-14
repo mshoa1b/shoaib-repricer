@@ -117,17 +117,20 @@ function calculatePricesForExportRecord(exportRecord: any) {
             const pGrade = p.grade || determineGrade(p.sku);
             return getBaseSku(p.sku) === baseSku && (pGrade === "A Grade" || pGrade === "G Grade" || pGrade === "B Grade");
           });
-          let totalVal = 0;
-          let totalQtyVal = 0;
+          let originalTotalVal = 0;
+          let ectonDenominator = 0;
           peers.forEach((p: any) => {
-            totalVal += getHistoricalPrice(p, baseStage) * p.quantity;
-            totalQtyVal += p.quantity;
+            const pGrade = p.grade || determineGrade(p.sku);
+            originalTotalVal += getHistoricalPrice(p, baseStage) * p.quantity;
+            if (pGrade === "A Grade") ectonDenominator += 1.08 * p.quantity;
+            else if (pGrade === "G Grade") ectonDenominator += 1.00 * p.quantity;
+            else if (pGrade === "B Grade") ectonDenominator += 0.90 * p.quantity;
           });
-          if (totalQtyVal > 0) {
-            const avg = totalVal / totalQtyVal;
-            if (grade === "A Grade") giBasePrice = avg * 1.08;
-            else if (grade === "G Grade") giBasePrice = avg * 1.00;
-            else if (grade === "B Grade") giBasePrice = avg * 0.90;
+          if (ectonDenominator > 0) {
+            const baselinePrice = originalTotalVal / ectonDenominator;
+            if (grade === "A Grade") giBasePrice = baselinePrice * 1.08;
+            else if (grade === "G Grade") giBasePrice = baselinePrice * 1.00;
+            else if (grade === "B Grade") giBasePrice = baselinePrice * 0.90;
           }
         }
       }
