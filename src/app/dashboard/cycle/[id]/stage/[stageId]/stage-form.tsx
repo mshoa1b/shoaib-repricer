@@ -47,7 +47,8 @@ export function StageConfigForm({
   initialData,
   allExports = [],
   fromCompany,
-  toCompany
+  toCompany,
+  prevBranchDataOverride
 }: {
   cycleId: string,
   boxes: Box[],
@@ -56,7 +57,8 @@ export function StageConfigForm({
   initialData?: any,
   allExports?: any[],
   fromCompany: string,
-  toCompany: string
+  toCompany: string,
+  prevBranchDataOverride?: Record<string, { price: number; branchId: string; branchName: string }>
 }) {
   const initialMarkupConfig = initialData?.markupConfig ? JSON.parse(initialData.markupConfig) : {};
 
@@ -71,7 +73,12 @@ export function StageConfigForm({
   const [flatMarkup, setFlatMarkup] = useState(initialMarkupConfig.flatMarkup || 0);
 
   const [enableGradeMarkups, setEnableGradeMarkups] = useState(initialMarkupConfig.enableGradeMarkups || false);
-  const [enableEctonGrading, setEnableEctonGrading] = useState(initialMarkupConfig.enableEctonGrading || false);
+  const defaultEctonGrading = stageId === "cp4-cp5";
+  const [enableEctonGrading, setEnableEctonGrading] = useState(
+    initialMarkupConfig.enableEctonGrading !== undefined 
+      ? initialMarkupConfig.enableEctonGrading 
+      : defaultEctonGrading
+  );
   const [gradeMarkups, setGradeMarkups] = useState<Record<string, number>>(
     initialMarkupConfig.gradeMarkups || { "Premium": 0, "A Grade": 0, "G Grade": 0, "B Grade": 0 }
   );
@@ -429,6 +436,7 @@ export function StageConfigForm({
   }, [rawItemsWithEcton, configMode, fromCompany, allExports, boxes]);
 
   const prevBranchData = useMemo(() => {
+    if (prevBranchDataOverride) return prevBranchDataOverride;
     if (fromCompany !== "CP-4" || toCompany !== "CP-5") return {};
 
     // 1. Get all other CP-4 -> CP-5 branches, sorted by createdAt descending
@@ -483,7 +491,7 @@ export function StageConfigForm({
     });
 
     return result;
-  }, [fromCompany, toCompany, allExports, currentBranchId, boxes]);
+  }, [fromCompany, toCompany, allExports, currentBranchId, boxes, prevBranchDataOverride]);
 
   const displayItems = useMemo(() => {
     let result = [...aggregatedItems].filter(item => 
@@ -810,10 +818,39 @@ export function StageConfigForm({
       </div>
 
       <div className="card glass-card p-6">
-        <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ marginBottom: '1.5rem' }}>
-          <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>3</span>
-          Box Inventory Assignment
-        </h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+          <h3 className="flex items-center text-sm uppercase tracking-wider text-secondary" style={{ margin: 0 }}>
+            <span className="step-number" style={{ width: '20px', height: '20px', fontSize: '10px' }}>3</span>
+            Box Inventory Assignment
+          </h3>
+          {availableBoxes.length > 0 && (
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem', borderRadius: '6px', cursor: 'pointer', margin: 0 }}
+                onClick={() => {
+                  const availableIds = availableBoxes.map(b => b.id);
+                  const newSelected = Array.from(new Set([...selectedBoxIds, ...availableIds]));
+                  setSelectedBoxIds(newSelected);
+                }}
+              >
+                Select All
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem', borderRadius: '6px', cursor: 'pointer', margin: 0 }}
+                onClick={() => {
+                  const availableIds = availableBoxes.map(b => b.id);
+                  setSelectedBoxIds(selectedBoxIds.filter(id => !availableIds.includes(id)));
+                }}
+              >
+                Deselect All
+              </button>
+            </div>
+          )}
+        </div>
         {availableBoxes.length === 0 ? (
           <div className="text-center py-8 text-secondary italic">
             All boxes for this stage are already assigned to other branches.
