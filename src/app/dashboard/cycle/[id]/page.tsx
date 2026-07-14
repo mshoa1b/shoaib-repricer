@@ -350,7 +350,7 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
   const cp5Total = calculateStageTotal("CP5");
 
   // Compute per-branch stats: total qty and total current stage value
-  const computeBranchStats = (branch: any): { totalQty: number; totalValue: number } => {
+  const computeBranchStats = (branch: any): { totalQty: number; totalValue: number; totalBaseValue: number } => {
     const config = JSON.parse(branch.markupConfig || "{}");
     const mode = branch.configurationMode || "mixed";
     const branchBoxIds = branch.invoiceBoxes.map((ib: any) => ib.boxId);
@@ -420,7 +420,9 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
 
     let totalQty = 0;
     let totalValue = 0;
+    let totalBaseValue = 0;
     Object.entries(groups).forEach(([key, group]) => {
+      totalBaseValue += group.avgPrice * group.qty;
       if (config.rowOverrides && config.rowOverrides[key] !== undefined) {
         totalValue += config.rowOverrides[key] * group.qty;
         totalQty += group.qty;
@@ -450,8 +452,20 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
         }
       }
     });
-    return { totalQty, totalValue };
+    return { totalQty, totalValue, totalBaseValue };
   };
+
+  const getStageProfit = (fromCompany: string, toCompany: string): number => {
+    const stageExports = allExports.filter(e => e.fromCompany === fromCompany && e.toCompany === toCompany);
+    return stageExports.reduce((sum, exp) => {
+      const stats = computeBranchStats(exp);
+      return sum + (stats.totalValue - stats.totalBaseValue);
+    }, 0);
+  };
+
+  const cp3Profit = getStageProfit("CP-2", "CP-3");
+  const cp4Profit = getStageProfit("CP-3", "CP-4");
+  const cp5Profit = getStageProfit("CP-4", "CP-5");
 
   const masterData = cycle.boxes.flatMap(box => 
     box.items.map(item => ({
@@ -500,22 +514,22 @@ export default async function CycleDetailPage({ params }: { params: Promise<{ id
           <div className="card text-center" style={{ flex: 1.5, padding: '1rem', display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: '100px' }}>
             <div className="text-secondary text-xs uppercase tracking-wider mb-1">CP-2 Sale Total</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>€{cp3Total.toLocaleString()}</div>
-            <div className="text-xs" style={{ color: 'var(--accent-success)', marginTop: '2px' }}>
-              +€{(cp3Total - cp2Total).toLocaleString()} Profit
+            <div className="text-xs" style={{ color: cp3Profit >= 0 ? 'var(--accent-success)' : '#ff5555', marginTop: '2px' }}>
+              {cp3Profit >= 0 ? '+' : ''}€{cp3Profit.toLocaleString()} Profit
             </div>
           </div>
           <div className="card text-center" style={{ flex: 1.5, padding: '1rem', display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: '100px' }}>
             <div className="text-secondary text-xs uppercase tracking-wider mb-1">CP-3 Sale Total</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>€{cp4Total.toLocaleString()}</div>
-            <div className="text-xs" style={{ color: 'var(--accent-success)', marginTop: '2px' }}>
-              +€{(cp4Total - cp3Total).toLocaleString()} Profit
+            <div className="text-xs" style={{ color: cp4Profit >= 0 ? 'var(--accent-success)' : '#ff5555', marginTop: '2px' }}>
+              {cp4Profit >= 0 ? '+' : ''}€{cp4Profit.toLocaleString()} Profit
             </div>
           </div>
           <div className="card text-center" style={{ flex: 1.5, padding: '1rem', display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: '100px' }}>
             <div className="text-secondary text-xs uppercase tracking-wider mb-1">CP-4 Sale Total</div>
             <div style={{ fontSize: '1.25rem', fontWeight: 600 }}>€{cp5Total.toLocaleString()}</div>
-            <div className="text-xs" style={{ color: 'var(--accent-success)', marginTop: '2px' }}>
-              +€{(cp5Total - cp4Total).toLocaleString()} Profit
+            <div className="text-xs" style={{ color: cp5Profit >= 0 ? 'var(--accent-success)' : '#ff5555', marginTop: '2px' }}>
+              {cp5Profit >= 0 ? '+' : ''}€{cp5Profit.toLocaleString()} Profit
             </div>
           </div>
         </div>
