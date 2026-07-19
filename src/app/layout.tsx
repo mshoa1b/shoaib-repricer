@@ -36,6 +36,7 @@ export default async function RootLayout({
             <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
               <a href="/dashboard" style={{ color: 'var(--text-secondary)' }}>Dashboard</a>
               <a href="/dashboard/combine-branches" style={{ color: 'var(--text-secondary)' }}>Combine Branches</a>
+              <a href="/dashboard/sales-search" style={{ color: 'var(--text-secondary)' }}>Sales Search</a>
               <LogoutButton />
             </div>
           )}
