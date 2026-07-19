@@ -3,12 +3,35 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
+const getDatabaseUrl = () => {
+  let url = process.env.DATABASE_URL || '';
+  if (process.env.DB_SSL === 'false') {
+    try {
+      const parsedUrl = new URL(url);
+      parsedUrl.searchParams.set('sslmode', 'disable');
+      parsedUrl.searchParams.delete('channel_binding');
+      return parsedUrl.toString();
+    } catch {
+      // Fallback regex replacement
+      if (url.includes('sslmode=')) {
+        url = url.replace(/sslmode=[^&]+/g, 'sslmode=disable');
+      } else {
+        url += (url.includes('?') ? '&' : '?') + 'sslmode=disable';
+      }
+      url = url.replace(/[&?]channel_binding=[^&]+/g, '');
+      return url;
+    }
+  }
+  return url;
+};
+
 export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
   },
   datasource: {
-    url: process.env["DATABASE_URL"] as string,
+    url: getDatabaseUrl(),
   },
 });
+
