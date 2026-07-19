@@ -1,5 +1,5 @@
 "use client";
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, Fragment } from "react";
 import { saveStageConfiguration } from "../../../../actions";
 import * as xlsx from "xlsx";
 
@@ -61,6 +61,7 @@ export function StageConfigForm({
   prevBranchDataOverride?: Record<string, { price: number; branchId: string; branchName: string }>
 }) {
   const initialMarkupConfig = initialData?.markupConfig ? JSON.parse(initialData.markupConfig) : {};
+  const initialRowOverrides = useMemo(() => initialMarkupConfig.rowOverrides || {}, [initialMarkupConfig]);
 
   const [branchName, setBranchName] = useState(initialData?.branchName || "");
   const [selectedBoxIds, setSelectedBoxIds] = useState<string[]>(
@@ -86,6 +87,12 @@ export function StageConfigForm({
   const [currentBranchId, setCurrentBranchId] = useState<string | null>(
     branchId === 'new' ? null : branchId
   );
+  const [enableDeviceGrouping, setEnableDeviceGrouping] = useState(
+    initialMarkupConfig.enableDeviceGrouping !== undefined 
+      ? initialMarkupConfig.enableDeviceGrouping 
+      : false
+  );
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
   const [isSaving, setIsSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState<Date | null>(
@@ -138,7 +145,8 @@ export function StageConfigForm({
             enableGradeMarkups,
             gradeMarkups,
             rowOverrides,
-            enableEctonGrading
+            enableEctonGrading,
+            enableDeviceGrouping
           }),
           boxIds: selectedBoxIds
         });
@@ -169,7 +177,8 @@ export function StageConfigForm({
     rowOverrides, 
     selectedBoxIds,
     cycleId, fromCompany, toCompany, currentBranchId,
-    enableEctonGrading
+    enableEctonGrading,
+    enableDeviceGrouping
   ]);
   
   const handleBulkPriceUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -493,6 +502,39 @@ export function StageConfigForm({
     return result;
   }, [fromCompany, toCompany, allExports, currentBranchId, boxes, prevBranchDataOverride]);
 
+  const getStackedGradeMarkup = (grades: Set<string>): number => {
+    if (!enableGradeMarkups) return 0;
+    let total = 0;
+    const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
+    let highestIndex = -1;
+    gradesList.forEach((g, idx) => {
+      if (grades.has(g)) highestIndex = idx;
+    });
+    if (highestIndex === -1) return 0;
+    for (let i = 0; i <= highestIndex; i++) {
+      total += (gradeMarkups[gradesList[i]] || 0);
+    }
+    return total;
+  };
+
+  const calculateRowPrice = (avgBasePrice: number, key: string, avgOffset: number = 0) => {
+    if (rowOverrides[key] !== undefined) return rowOverrides[key];
+    
+    let base = avgBasePrice || 0;
+    if (toCompany === "CP-5") {
+      base += avgOffset;
+    }
+
+    let price = (base * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
+    if (enableGradeMarkups) {
+      const group = aggregatedItems.find(i => i.key === key);
+      if (group) {
+        price += getStackedGradeMarkup(group.grades);
+      }
+    }
+    return Math.round(price) || 0;
+  };
+
   const displayItems = useMemo(() => {
     let result = [...aggregatedItems].filter(item => 
       item.productName.toLowerCase().includes(search.toLowerCase()) ||
@@ -506,8 +548,13 @@ export function StageConfigForm({
         
         // Handle calculated prices if sorting by current stage
         if (sortField === "currentPrice") {
-          valA = calculateRowPrice(a.avgPrice, a.key);
-          valB = calculateRowPrice(b.avgPrice, b.key);
+          valA = calculateRowPrice(a.avgPrice, a.key, a.avgOffset);
+          valB = calculateRowPrice(b.avgPrice, b.key, b.avgOffset);
+        }
+
+        if (sortField === "profitPerUnit") {
+          valA = calculateRowPrice(a.avgPrice, a.key, a.avgOffset) - a.avgPrice;
+          valB = calculateRowPrice(b.avgPrice, b.key, b.avgOffset) - b.avgPrice;
         }
 
         if (typeof valA === "string" && typeof valB === "string") {
@@ -549,38 +596,62 @@ export function StageConfigForm({
     return <span style={{ marginLeft: '4px' }}>{sortOrder === "asc" ? "↑" : "↓"}</span>;
   };
 
-  const getStackedGradeMarkup = (grades: Set<string>): number => {
-    if (!enableGradeMarkups) return 0;
-    let total = 0;
-    const gradesList = ["B Grade", "G Grade", "A Grade", "Premium"];
-    let highestIndex = -1;
-    gradesList.forEach((g, idx) => {
-      if (grades.has(g)) highestIndex = idx;
-    });
-    if (highestIndex === -1) return 0;
-    for (let i = 0; i <= highestIndex; i++) {
-      total += (gradeMarkups[gradesList[i]] || 0);
-    }
-    return total;
-  };
 
-  const calculateRowPrice = (avgBasePrice: number, key: string, avgOffset: number = 0) => {
-    if (rowOverrides[key] !== undefined) return rowOverrides[key];
+
+  const groupedDisplayItems = useMemo(() => {
+    if (!enableDeviceGrouping || fromCompany !== "CP-4" || toCompany !== "CP-5") {
+      return [];
+    }
     
-    let base = avgBasePrice || 0;
-    if (toCompany === "CP-5") {
-      base += avgOffset;
-    }
-
-    let price = (base * (1 + (percentageMarkup || 0) / 100)) + (flatMarkup || 0);
-    if (enableGradeMarkups) {
-      const group = aggregatedItems.find(i => i.key === key);
-      if (group) {
-        price += getStackedGradeMarkup(group.grades);
+    const groupsMap = new Map<string, typeof displayItems>();
+    displayItems.forEach(item => {
+      const key = item.productName;
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, []);
       }
-    }
-    return Math.round(price) || 0;
-  };
+      groupsMap.get(key)!.push(item);
+    });
+
+    return Array.from(groupsMap.entries()).map(([productName, items]) => {
+      const groupQty = items.reduce((sum, i) => sum + i.qty, 0);
+      
+      const totalOriginalValue = items.reduce((sum, i) => sum + (i.originalAvgPrice * i.qty), 0);
+      const avgOriginalPrice = groupQty > 0 ? totalOriginalValue / groupQty : 0;
+
+      const totalBaseValue = items.reduce((sum, i) => sum + (i.avgPrice * i.qty), 0);
+      const avgBasePrice = groupQty > 0 ? totalBaseValue / groupQty : 0;
+
+      const totalOffsetValue = items.reduce((sum, i) => sum + ((i.avgOffset || 0) * i.qty), 0);
+      const avgOffset = groupQty > 0 ? totalOffsetValue / groupQty : 0;
+
+      const totalFinalValue = items.reduce((sum, i) => {
+        const finalPrice = calculateRowPrice(i.avgPrice, i.key, i.avgOffset);
+        return sum + (finalPrice * i.qty);
+      }, 0);
+      const avgFinalPrice = groupQty > 0 ? totalFinalValue / groupQty : 0;
+
+      let totalPrevValue = 0;
+      let prevQty = 0;
+      items.forEach(i => {
+        if (prevBranchData[i.sku]) {
+          totalPrevValue += prevBranchData[i.sku].price * i.qty;
+          prevQty += i.qty;
+        }
+      });
+      const avgPrevPrice = prevQty > 0 ? totalPrevValue / prevQty : null;
+
+      return {
+        productName,
+        totalQty: groupQty,
+        avgOriginalPrice,
+        avgBasePrice,
+        avgOffset,
+        avgFinalPrice,
+        avgPrevPrice,
+        items
+      };
+    });
+  }, [displayItems, enableDeviceGrouping, fromCompany, toCompany, prevBranchData, percentageMarkup, flatMarkup, enableGradeMarkups, gradeMarkups, rowOverrides]);
 
   const totalQty = aggregatedItems.reduce((sum, item) => sum + item.qty, 0);
   const totalLastStageValue = aggregatedItems.reduce((sum, item) => sum + (item.avgPrice * item.qty), 0);
@@ -626,6 +697,22 @@ export function StageConfigForm({
             <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: isSaving ? 'var(--accent-primary)' : 'var(--accent-success)' }} />
             {isSaving ? "Saving..." : lastSaved ? `All changes saved ${timeAgo}` : "Not saved yet"}
           </div>
+          {currentBranchId && (
+            <div className="flex items-center gap-2 text-xs text-secondary" style={{ marginTop: '0.5rem' }}>
+              <span>Branch ID: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px', fontFamily: 'monospace' }}>{currentBranchId}</code></span>
+              <button 
+                type="button" 
+                onClick={() => {
+                  navigator.clipboard.writeText(currentBranchId);
+                  alert("Branch ID copied to clipboard!");
+                }}
+                className="btn btn-secondary"
+                style={{ padding: '2px 8px', fontSize: '0.65rem', borderRadius: '4px', cursor: 'pointer', margin: 0 }}
+              >
+                Copy
+              </button>
+            </div>
+          )}
         </div>
         
         <div style={{ flex: 2, display: 'flex', justifyContent: 'center', gap: '4rem' }}>
@@ -664,7 +751,8 @@ export function StageConfigForm({
               enableGradeMarkups, 
               gradeMarkups, 
               rowOverrides,
-              enableEctonGrading
+              enableEctonGrading,
+              enableDeviceGrouping
             })} />
             <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 2rem' }} disabled={selectedBoxIds.length === 0 || !branchName}>
               Export CSV
@@ -885,6 +973,36 @@ export function StageConfigForm({
             Pricing Preview & Manual Overrides
           </h3>
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            {fromCompany === "CP-4" && toCompany === "CP-5" && (
+              <div 
+                className="flex items-center gap-3" 
+                onClick={() => setEnableDeviceGrouping(!enableDeviceGrouping)}
+                style={{ cursor: 'pointer', userSelect: 'none', background: 'rgba(255,255,255,0.03)', padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}
+              >
+                <div style={{
+                  width: '32px',
+                  height: '16px',
+                  background: enableDeviceGrouping ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)',
+                  borderRadius: '16px',
+                  position: 'relative',
+                  transition: 'all 0.3s ease'
+                }}>
+                  <div style={{
+                    width: '12px',
+                    height: '12px',
+                    background: 'white',
+                    borderRadius: '50%',
+                    position: 'absolute',
+                    top: '2px',
+                    left: enableDeviceGrouping ? '18px' : '2px',
+                    transition: 'all 0.3s ease'
+                  }} />
+                </div>
+                <label style={{ margin: 0, fontSize: '0.8rem', cursor: 'pointer', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Enable Device Grouping
+                </label>
+              </div>
+            )}
             <label className="btn btn-secondary" style={{ padding: '0.4rem 1rem', fontSize: '0.75rem', borderRadius: '8px', cursor: 'pointer', margin: 0 }}>
               Bulk Upload Pricing
               <input type="file" accept=".csv, .xlsx, .xls" style={{ display: 'none' }} onChange={handleBulkPriceUpload} />
@@ -916,191 +1034,505 @@ export function StageConfigForm({
                     <th style={{ width: '50px' }}></th>
                   </>
                 )}
+                <th className="text-center" style={{ cursor: 'pointer' }} onClick={() => toggleSort("profitPerUnit")}>Profit <SortIcon field="profitPerUnit" /></th>
                 <th className="text-center" style={{ width: '200px', cursor: 'pointer' }} onClick={() => toggleSort("currentPrice")}>Current Stage (€) <SortIcon field="currentPrice" /></th>
               </tr>
             </thead>
             <tbody>
-              {displayItems.map(item => {
-                const finalPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
-
-                // Exceeds premium warning logic
-                let exceedsPremium = false;
-                let premiumGapTooSmall = false;
-                let premiumPrice = 0;
-                let priceDifference = 0;
-                const itemGrade = item.grades.size === 1 ? Array.from(item.grades)[0] : determineGrade(item.sku);
-                if (itemGrade && ["A Grade", "G Grade", "B Grade"].includes(itemGrade)) {
-                  const baseSku = getBaseSku(item.sku);
-                  const premiumGroups = aggregatedItems.filter(g => {
-                    return g.grades.has("Premium") && g.productName === item.productName;
-                  });
-                  let minPremiumPrice = Infinity;
-                  let hasPremium = false;
-                  premiumGroups.forEach(g => {
-                    const pPrice = calculateRowPrice(g.avgPrice, g.key, g.avgOffset);
-                    if (pPrice < minPremiumPrice) {
-                      minPremiumPrice = pPrice;
-                      hasPremium = true;
-                    }
-                  });
-                  if (hasPremium) {
-                    premiumPrice = minPremiumPrice;
-                    priceDifference = premiumPrice - finalPrice;
-                    if (finalPrice > premiumPrice) {
-                      exceedsPremium = true;
-                    } else if (priceDifference < 10) {
-                      premiumGapTooSmall = true;
-                    }
-                  }
-                }
-
-                return (
-                  <tr key={item.key}>
-                    <td className="text-center" style={{ padding: '0.75rem 1rem' }}>
-                      <div style={{ fontWeight: 600 }}>{item.productName}</div>
-                      <div className="text-xs text-secondary">
-                        {Array.from(item.grades)
-                          .sort((a, b) => {
-                            const order = ["Premium", "A Grade", "G Grade", "B Grade"];
-                            return order.indexOf(a) - order.indexOf(b);
-                          })
-                          .join(", ")}
-                      </div>
-                    </td>
-                    <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem' }}>
-                      {configMode === "mixed" ? "MIXED" : item.sku}
-                    </td>
-                    <td className="text-center" style={{ fontWeight: 600 }}>{item.qty}</td>
-                    <td className="font-mono text-center">
-                      <div className="text-secondary" style={{ fontSize: '0.85rem' }}>
-                        €{item.originalAvgPrice.toFixed(2)}
-                      </div>
-                      {enableEctonGrading && (item.avgPrice !== item.originalAvgPrice) && (
-                        <div style={{ color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px' }}>
-                          &rarr; €{item.avgPrice.toFixed(2)}
-                        </div>
-                      )}
-                    </td>
-                    <td className="text-center">
-                      <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.85rem' }}>
-                        {rowOverrides[item.key] !== undefined ? (
-                          <span style={{ color: 'var(--accent-primary)' }}>
-                            +€{(rowOverrides[item.key] - item.originalAvgPrice).toFixed(2)} (Manual)
+              {enableDeviceGrouping && fromCompany === "CP-4" && toCompany === "CP-5" ? (
+                groupedDisplayItems.map(group => {
+                  const isExpanded = !!expandedGroups[group.productName];
+                  const updatedCount = group.items.filter(i => rowOverrides[i.key] !== undefined && rowOverrides[i.key] !== initialRowOverrides[i.key]).length;
+                  const hasUpdatedChildren = updatedCount > 0;
+                  const groupProfit = group.items.reduce((sum, i) => {
+                    const finalPrice = calculateRowPrice(i.avgPrice, i.key, i.avgOffset);
+                    return sum + (finalPrice - i.avgPrice) * i.qty;
+                  }, 0);
+                  return (
+                    <Fragment key={group.productName}>
+                      {/* Parent Group Row */}
+                      <tr 
+                        style={{ 
+                          cursor: 'pointer', 
+                          background: hasUpdatedChildren ? 'rgba(59, 130, 246, 0.08)' : 'rgba(255, 255, 255, 0.05)', 
+                          fontWeight: 600 
+                        }}
+                        onClick={() => setExpandedGroups(prev => ({ ...prev, [group.productName]: !prev[group.productName] }))}
+                      >
+                        <td style={{ padding: '0.75rem 1rem' }}>
+                          <span style={{ marginRight: '8px', color: 'var(--accent-primary)', display: 'inline-block', width: '12px' }}>
+                            {isExpanded ? "▼" : "▶"}
                           </span>
-                        ) : (
-                          <>
-                            {enableEctonGrading && (item.avgPrice - item.originalAvgPrice) !== 0 && (
-                              <span style={{ color: (item.avgPrice - item.originalAvgPrice) > 0 ? '#ff8c00' : '#ff5555', fontSize: '0.75rem' }}>
-                                {(item.avgPrice - item.originalAvgPrice) > 0 ? '+' : ''}€{(item.avgPrice - item.originalAvgPrice).toFixed(2)} Ecton Grading
-                              </span>
-                            )}
-                            {(item.avgOffset !== 0 && toCompany === "CP-5") && (
-                              <span style={{ color: item.avgOffset > 0 ? 'var(--accent-primary)' : '#ff5555', fontSize: '0.75rem' }}>
-                                {item.avgOffset > 0 ? '+' : ''}€{item.avgOffset.toFixed(2)} Grade Split
-                              </span>
-                            )}
-                            <span style={{ color: 'var(--accent-primary)' }}>
-                              +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)} Markup
+                          <span style={{ color: 'white' }}>{group.productName}</span>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginLeft: '8px', fontWeight: 400 }}>
+                            ({group.items.length} {group.items.length === 1 ? 'variant' : 'variants'})
+                          </span>
+                          {hasUpdatedChildren && (
+                            <span style={{ color: 'var(--accent-primary)', fontSize: '0.7rem', marginLeft: '12px', background: 'rgba(59, 130, 246, 0.15)', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>
+                              ● {updatedCount} updated
                             </span>
-                            {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
-                              <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)} Stacked</span>
-                            )}
+                          )}
+                        </td>
+                        <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem', opacity: 0.6 }}>
+                          Grouped
+                        </td>
+                        <td className="text-center" style={{ fontWeight: 700 }}>{group.totalQty}</td>
+                        <td className="font-mono text-center">
+                          <div className="text-secondary" style={{ fontSize: '0.85rem' }}>
+                            €{group.avgOriginalPrice.toFixed(2)}
+                          </div>
+                          {enableEctonGrading && (group.avgBasePrice !== group.avgOriginalPrice) && (
+                            <div style={{ color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px' }}>
+                              &rarr; €{group.avgBasePrice.toFixed(2)}
+                            </div>
+                          )}
+                        </td>
+                        <td className="text-center">
+                          <span style={{ color: 'var(--accent-primary)', fontSize: '0.85rem' }}>
+                            Avg +€{(group.avgFinalPrice - group.avgOriginalPrice).toFixed(2)}
+                          </span>
+                        </td>
+                        {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                          <>
+                            <td className="text-center font-mono">
+                              {group.avgPrevPrice !== null ? (
+                                <span className="prev-branch-price">€{group.avgPrevPrice.toFixed(2)}</span>
+                              ) : (
+                                <span className="text-secondary">—</span>
+                              )}
+                            </td>
+                            <td className="text-center" style={{ padding: '0.25rem' }}>
+                              {group.avgPrevPrice !== null && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const newOverrides = { ...rowOverrides };
+                                    group.items.forEach(i => {
+                                      if (prevBranchData[i.sku]) {
+                                        newOverrides[i.key] = prevBranchData[i.sku].price;
+                                      }
+                                    });
+                                    setRowOverrides(newOverrides);
+                                  }}
+                                  className="btn btn-secondary"
+                                  style={{
+                                    padding: '0.2rem 0.5rem',
+                                    fontSize: '0.7rem',
+                                    borderRadius: '6px',
+                                    border: '1px solid var(--border-subtle)',
+                                    cursor: 'pointer',
+                                    background: 'rgba(255, 255, 255, 0.05)',
+                                    color: 'var(--accent-primary)',
+                                    margin: 0
+                                  }}
+                                  title="Copy previous stage value for all items in this group"
+                                >
+                                  &rarr; All
+                                </button>
+                              )}
+                            </td>
                           </>
                         )}
-                      </div>
-                    </td>
-                    {fromCompany === "CP-4" && toCompany === "CP-5" && (
-                      <>
-                        <td className="text-center font-mono" style={{ padding: '0.75rem 1rem' }}>
-                          {prevBranchData[item.sku] ? (
-                            <div className="prev-branch-container">
-                              <span className="prev-branch-price">€{prevBranchData[item.sku].price.toFixed(2)}</span>
-                              <div className="prev-branch-popover">
-                                <a
-                                  href={`/dashboard/cycle/${cycleId}/stage/cp4-cp5/${prevBranchData[item.sku].branchId}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="prev-branch-popover-link"
-                                >
-                                  View Branch: {prevBranchData[item.sku].branchName} ↗
-                                </a>
+                        <td className="text-center" style={{ fontWeight: 700, color: groupProfit >= 0 ? 'var(--accent-success)' : 'var(--accent-danger)' }}>
+                          €{groupProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="text-center" style={{ fontWeight: 700 }}>
+                          €{group.avgFinalPrice.toFixed(2)} <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--text-secondary)' }}>(Avg)</span>
+                        </td>
+                      </tr>
+                      {/* Child Rows */}
+                      {isExpanded && [...group.items].sort((a, b) => {
+                        const customGradeOrder = ["Premium", "A Grade", "G Grade", "B Grade"];
+                        const gradeA = a.grades.size === 1 ? Array.from(a.grades)[0] : determineGrade(a.sku);
+                        const gradeB = b.grades.size === 1 ? Array.from(b.grades)[0] : determineGrade(b.sku);
+                        let idxA = customGradeOrder.indexOf(gradeA);
+                        let idxB = customGradeOrder.indexOf(gradeB);
+                        if (idxA === -1) idxA = 99;
+                        if (idxB === -1) idxB = 99;
+                        return idxA - idxB;
+                      }).map(item => {
+                        const finalPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
+                        
+                        // Exceeds premium warning logic
+                        let exceedsPremium = false;
+                        let premiumGapTooSmall = false;
+                        let premiumPrice = 0;
+                        let priceDifference = 0;
+                        const itemGrade = item.grades.size === 1 ? Array.from(item.grades)[0] : determineGrade(item.sku);
+                        if (itemGrade && ["A Grade", "G Grade", "B Grade"].includes(itemGrade)) {
+                          const premiumGroups = aggregatedItems.filter(g => {
+                            return g.grades.has("Premium") && g.productName === item.productName;
+                          });
+                          let minPremiumPrice = Infinity;
+                          let hasPremium = false;
+                          premiumGroups.forEach(g => {
+                            const pPrice = calculateRowPrice(g.avgPrice, g.key, g.avgOffset);
+                            if (pPrice < minPremiumPrice) {
+                              minPremiumPrice = pPrice;
+                              hasPremium = true;
+                            }
+                          });
+                          if (hasPremium) {
+                            premiumPrice = minPremiumPrice;
+                            priceDifference = premiumPrice - finalPrice;
+                            if (finalPrice > premiumPrice) {
+                              exceedsPremium = true;
+                            } else if (priceDifference < 5) {
+                              premiumGapTooSmall = true;
+                            }
+                          }
+                        }
+
+                        const isUpdated = rowOverrides[item.key] !== undefined && rowOverrides[item.key] !== initialRowOverrides[item.key];
+
+                        return (
+                          <tr key={item.key} style={{ background: isUpdated ? 'rgba(59, 130, 246, 0.08)' : 'rgba(0, 0, 0, 0.15)' }}>
+                            <td style={{ padding: '0.75rem 1rem 0.75rem 2.5rem' }}>
+                              <div style={{ fontWeight: 500, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                                <div style={{ fontSize: '0.85rem' }}>
+                                  {item.grades.size === 1 ? Array.from(item.grades)[0] : "Variant"}
+                                </div>
+                                <div className="text-xs text-secondary">
+                                  {item.productName}
+                                </div>
                               </div>
-                            </div>
+                            </td>
+                            <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem' }}>
+                              {configMode === "mixed" ? "MIXED" : item.sku}
+                            </td>
+                            <td className="text-center" style={{ fontWeight: 500 }}>{item.qty}</td>
+                            <td className="font-mono text-center">
+                              <div className="text-secondary" style={{ fontSize: '0.85rem' }}>
+                                €{item.originalAvgPrice.toFixed(2)}
+                              </div>
+                              {enableEctonGrading && (item.avgPrice !== item.originalAvgPrice) && (
+                                <div style={{ color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px' }}>
+                                  &rarr; €{item.avgPrice.toFixed(2)}
+                                </div>
+                              )}
+                            </td>
+                            <td className="text-center">
+                              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.85rem' }}>
+                                {rowOverrides[item.key] !== undefined ? (
+                                  <span style={{ color: 'var(--accent-primary)' }}>
+                                    +€{(rowOverrides[item.key] - item.originalAvgPrice).toFixed(2)} (Manual)
+                                  </span>
+                                ) : (
+                                  <>
+                                    {enableEctonGrading && (item.avgPrice - item.originalAvgPrice) !== 0 && (
+                                      <span style={{ color: (item.avgPrice - item.originalAvgPrice) > 0 ? '#ff8c00' : '#ff5555', fontSize: '0.75rem' }}>
+                                        {(item.avgPrice - item.originalAvgPrice) > 0 ? '+' : ''}€{(item.avgPrice - item.originalAvgPrice).toFixed(2)} Ecton Grading
+                                      </span>
+                                    )}
+                                    {(item.avgOffset !== 0 && toCompany === "CP-5") && (
+                                      <span style={{ color: item.avgOffset > 0 ? 'var(--accent-primary)' : '#ff5555', fontSize: '0.75rem' }}>
+                                        {item.avgOffset > 0 ? '+' : ''}€{item.avgOffset.toFixed(2)} Grade Split
+                                      </span>
+                                    )}
+                                    <span style={{ color: 'var(--accent-primary)' }}>
+                                      +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)} Markup
+                                    </span>
+                                    {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
+                                      <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)} Stacked</span>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                            {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                              <>
+                                <td className="text-center font-mono" style={{ padding: '0.75rem 1rem' }}>
+                                  {prevBranchData[item.sku] ? (
+                                    <div className="prev-branch-container">
+                                      <span className="prev-branch-price">€{prevBranchData[item.sku].price.toFixed(2)}</span>
+                                      <div className="prev-branch-popover">
+                                        <a
+                                          href={`/dashboard/cycle/${cycleId}/stage/cp4-cp5/${prevBranchData[item.sku].branchId}`}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="prev-branch-popover-link"
+                                        >
+                                          View Branch: {prevBranchData[item.sku].branchName} ↗
+                                        </a>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <span className="text-secondary">—</span>
+                                  )}
+                                </td>
+                                <td className="text-center" style={{ padding: '0.75rem 0.5rem', verticalAlign: 'middle' }}>
+                                  {prevBranchData[item.sku] && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setRowOverrides(prev => ({
+                                          ...prev,
+                                          [item.key]: prevBranchData[item.sku].price
+                                        }));
+                                      }}
+                                      className="btn btn-secondary"
+                                      style={{
+                                        padding: '0.2rem 0.4rem',
+                                        fontSize: '0.8rem',
+                                        borderRadius: '6px',
+                                        border: '1px solid var(--border-subtle)',
+                                        cursor: 'pointer',
+                                        background: 'rgba(255, 255, 255, 0.03)',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        color: 'var(--accent-primary)',
+                                        transition: 'all 0.2s ease',
+                                        margin: 0
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        e.currentTarget.style.background = 'var(--accent-primary)';
+                                        e.currentTarget.style.color = 'white';
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
+                                        e.currentTarget.style.color = 'var(--accent-primary)';
+                                      }}
+                                      title="Copy previous stage value to current stage"
+                                    >
+                                      &rarr;
+                                    </button>
+                                  )}
+                                </td>
+                              </>
+                            )}
+                            <td className="text-center font-mono" style={{ fontWeight: 600, color: (finalPrice - item.avgPrice) * item.qty >= 0 ? 'var(--accent-success)' : 'var(--accent-danger)' }}>
+                              €{((finalPrice - item.avgPrice) * item.qty).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              <div style={{ fontSize: '0.75rem', fontWeight: 400, opacity: 0.7 }}>
+                                (€{(finalPrice - item.avgPrice).toFixed(2)}/u)
+                              </div>
+                            </td>
+                            <td style={{ padding: '0.5rem' }} className="text-center">
+                              <div className="flex flex-col items-center justify-center">
+                                <ManualPriceInput
+                                  initialValue={finalPrice}
+                                  onSave={(val) => setRowOverrides({ ...rowOverrides, [item.key]: val })}
+                                />
+                                {isUpdated && (
+                                  <span style={{ color: 'var(--accent-primary)', fontSize: '0.65rem', fontWeight: 600, marginTop: '4px' }}>
+                                    ● Modified
+                                  </span>
+                                )}
+                                {exceedsPremium && (
+                                  <div style={{ color: '#ff5555', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                                    ⚠️ Exceeds Premium (€{premiumPrice.toFixed(2)})
+                                  </div>
+                                )}
+                                {premiumGapTooSmall && (
+                                  <div style={{ color: '#ff8c00', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                                    ⚠️ Premium Gap &lt; €5 (€{priceDifference.toFixed(2)})
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
+                  );
+                })
+              ) : (
+                displayItems.map(item => {
+                  const finalPrice = calculateRowPrice(item.avgPrice, item.key, item.avgOffset);
+
+                  // Exceeds premium warning logic
+                  let exceedsPremium = false;
+                  let premiumGapTooSmall = false;
+                  let premiumPrice = 0;
+                  let priceDifference = 0;
+                  const itemGrade = item.grades.size === 1 ? Array.from(item.grades)[0] : determineGrade(item.sku);
+                  if (itemGrade && ["A Grade", "G Grade", "B Grade"].includes(itemGrade)) {
+                    const baseSku = getBaseSku(item.sku);
+                    const premiumGroups = aggregatedItems.filter(g => {
+                      return g.grades.has("Premium") && g.productName === item.productName;
+                    });
+                    let minPremiumPrice = Infinity;
+                    let hasPremium = false;
+                    premiumGroups.forEach(g => {
+                      const pPrice = calculateRowPrice(g.avgPrice, g.key, g.avgOffset);
+                      if (pPrice < minPremiumPrice) {
+                        minPremiumPrice = pPrice;
+                        hasPremium = true;
+                      }
+                    });
+                    if (hasPremium) {
+                      premiumPrice = minPremiumPrice;
+                      priceDifference = premiumPrice - finalPrice;
+                      if (finalPrice > premiumPrice) {
+                        exceedsPremium = true;
+                      } else if (priceDifference < 5) {
+                        premiumGapTooSmall = true;
+                      }
+                    }
+                  }
+
+                  const isUpdated = rowOverrides[item.key] !== undefined && rowOverrides[item.key] !== initialRowOverrides[item.key];
+
+                  return (
+                    <tr key={item.key} style={{ background: isUpdated ? 'rgba(59, 130, 246, 0.08)' : undefined }}>
+                      <td className="text-center" style={{ padding: '0.75rem 1rem' }}>
+                        <div style={{ fontWeight: 600 }}>{item.productName}</div>
+                        <div className="text-xs text-secondary">
+                          {Array.from(item.grades)
+                            .sort((a, b) => {
+                              const order = ["Premium", "A Grade", "G Grade", "B Grade"];
+                              return order.indexOf(a) - order.indexOf(b);
+                            })
+                            .join(", ")}
+                        </div>
+                      </td>
+                      <td className="text-center text-secondary font-mono" style={{ fontSize: '0.75rem' }}>
+                        {configMode === "mixed" ? "MIXED" : item.sku}
+                      </td>
+                      <td className="text-center" style={{ fontWeight: 600 }}>{item.qty}</td>
+                      <td className="font-mono text-center">
+                        <div className="text-secondary" style={{ fontSize: '0.85rem' }}>
+                          €{item.originalAvgPrice.toFixed(2)}
+                        </div>
+                        {enableEctonGrading && (item.avgPrice !== item.originalAvgPrice) && (
+                          <div style={{ color: 'var(--accent-primary)', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px' }}>
+                            &rarr; €{item.avgPrice.toFixed(2)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="text-center">
+                        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.85rem' }}>
+                          {rowOverrides[item.key] !== undefined ? (
+                            <span style={{ color: 'var(--accent-primary)' }}>
+                              +€{(rowOverrides[item.key] - item.originalAvgPrice).toFixed(2)} (Manual)
+                            </span>
                           ) : (
-                            <span className="text-secondary">—</span>
+                            <>
+                              {enableEctonGrading && (item.avgPrice - item.originalAvgPrice) !== 0 && (
+                                <span style={{ color: (item.avgPrice - item.originalAvgPrice) > 0 ? '#ff8c00' : '#ff5555', fontSize: '0.75rem' }}>
+                                  {(item.avgPrice - item.originalAvgPrice) > 0 ? '+' : ''}€{(item.avgPrice - item.originalAvgPrice).toFixed(2)} Ecton Grading
+                                </span>
+                              )}
+                              {(item.avgOffset !== 0 && toCompany === "CP-5") && (
+                                <span style={{ color: item.avgOffset > 0 ? 'var(--accent-primary)' : '#ff5555', fontSize: '0.75rem' }}>
+                                  {item.avgOffset > 0 ? '+' : ''}€{item.avgOffset.toFixed(2)} Grade Split
+                                </span>
+                              )}
+                              <span style={{ color: 'var(--accent-primary)' }}>
+                                +€{((item.avgPrice * (percentageMarkup / 100)) + flatMarkup).toFixed(2)} Markup
+                              </span>
+                              {enableGradeMarkups && getStackedGradeMarkup(item.grades) > 0 && (
+                                <span style={{ color: '#ff8c00' }}>+ €{getStackedGradeMarkup(item.grades).toFixed(2)} Stacked</span>
+                              )}
+                            </>
                           )}
-                        </td>
-                        <td className="text-center" style={{ padding: '0.75rem 0.5rem', verticalAlign: 'middle' }}>
-                          {prevBranchData[item.sku] && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setRowOverrides(prev => ({
-                                  ...prev,
-                                  [item.key]: prevBranchData[item.sku].price
-                                }));
-                              }}
-                              className="btn btn-secondary"
-                              style={{
-                                padding: '0.2rem 0.4rem',
-                                fontSize: '0.8rem',
-                                borderRadius: '6px',
-                                border: '1px solid var(--border-subtle)',
-                                cursor: 'pointer',
-                                background: 'rgba(255, 255, 255, 0.03)',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                color: 'var(--accent-primary)',
-                                transition: 'all 0.2s ease',
-                                margin: 0
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.background = 'var(--accent-primary)';
-                                e.currentTarget.style.color = 'white';
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
-                                e.currentTarget.style.color = 'var(--accent-primary)';
-                              }}
-                              title="Copy previous stage value to current stage"
-                            >
-                              &rarr;
-                            </button>
+                        </div>
+                      </td>
+                      {fromCompany === "CP-4" && toCompany === "CP-5" && (
+                        <>
+                          <td className="text-center font-mono" style={{ padding: '0.75rem 1rem' }}>
+                            {prevBranchData[item.sku] ? (
+                              <div className="prev-branch-container">
+                                <span className="prev-branch-price">€{prevBranchData[item.sku].price.toFixed(2)}</span>
+                                <div className="prev-branch-popover">
+                                  <a
+                                    href={`/dashboard/cycle/${cycleId}/stage/cp4-cp5/${prevBranchData[item.sku].branchId}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="prev-branch-popover-link"
+                                  >
+                                    View Branch: {prevBranchData[item.sku].branchName} ↗
+                                  </a>
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-secondary">—</span>
+                            )}
+                          </td>
+                          <td className="text-center" style={{ padding: '0.75rem 0.5rem', verticalAlign: 'middle' }}>
+                            {prevBranchData[item.sku] && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRowOverrides(prev => ({
+                                    ...prev,
+                                    [item.key]: prevBranchData[item.sku].price
+                                  }));
+                                }}
+                                className="btn btn-secondary"
+                                style={{
+                                  padding: '0.2rem 0.4rem',
+                                  fontSize: '0.8rem',
+                                  borderRadius: '6px',
+                                  border: '1px solid var(--border-subtle)',
+                                  cursor: 'pointer',
+                                  background: 'rgba(255, 255, 255, 0.03)',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  color: 'var(--accent-primary)',
+                                  transition: 'all 0.2s ease',
+                                  margin: 0
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.background = 'var(--accent-primary)';
+                                  e.currentTarget.style.color = 'white';
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.03)';
+                                  e.currentTarget.style.color = 'var(--accent-primary)';
+                                }}
+                                title="Copy previous stage value to current stage"
+                              >
+                                &rarr;
+                              </button>
+                            )}
+                          </td>
+                        </>
+                      )}
+                      <td className="text-center font-mono" style={{ fontWeight: 600, color: (finalPrice - item.avgPrice) * item.qty >= 0 ? 'var(--accent-success)' : 'var(--accent-danger)' }}>
+                        €{((finalPrice - item.avgPrice) * item.qty).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <div style={{ fontSize: '0.75rem', fontWeight: 400, opacity: 0.7 }}>
+                          (€{(finalPrice - item.avgPrice).toFixed(2)}/u)
+                        </div>
+                      </td>
+                      <td style={{ padding: '0.5rem' }} className="text-center">
+                        <div className="flex flex-col items-center justify-center">
+                          <ManualPriceInput
+                            initialValue={finalPrice}
+                            onSave={(val) => setRowOverrides({ ...rowOverrides, [item.key]: val })}
+                          />
+                          {isUpdated && (
+                            <span style={{ color: 'var(--accent-primary)', fontSize: '0.65rem', fontWeight: 600, marginTop: '4px' }}>
+                              ● Modified
+                            </span>
                           )}
-                        </td>
-                      </>
-                    )}
-                    <td style={{ padding: '0.5rem' }} className="text-center">
-                      <div className="flex flex-col items-center justify-center">
-                        <ManualPriceInput
-                          initialValue={finalPrice}
-                          onSave={(val) => setRowOverrides({ ...rowOverrides, [item.key]: val })}
-                        />
-                        {exceedsPremium && (
-                          <div style={{ color: '#ff5555', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
-                            ⚠️ Exceeds Premium (€{premiumPrice.toFixed(2)})
-                          </div>
-                        )}
-                        {premiumGapTooSmall && (
-                          <div style={{ color: '#ff8c00', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
-                            ⚠️ Premium Gap &lt; €10 (€{priceDifference.toFixed(2)})
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                          {exceedsPremium && (
+                            <div style={{ color: '#ff5555', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                              ⚠️ Exceeds Premium (€{premiumPrice.toFixed(2)})
+                            </div>
+                          )}
+                          {premiumGapTooSmall && (
+                            <div style={{ color: '#ff8c00', fontSize: '0.7rem', fontWeight: 600, marginTop: '4px', maxWidth: '160px', textAlign: 'center' }}>
+                              ⚠️ Premium Gap &lt; €5 (€{priceDifference.toFixed(2)})
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
               {aggregatedItems.length === 0 ? (
                 <tr>
-                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 8 : 6} className="text-center py-20 text-secondary">
+                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 9 : 7} className="text-center py-20 text-secondary">
                     Select source inventory to calculate prices.
                   </td>
                 </tr>
               ) : displayItems.length === 0 ? (
                 <tr>
-                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 8 : 6} className="text-center py-20 text-secondary">
+                  <td colSpan={fromCompany === "CP-4" && toCompany === "CP-5" ? 9 : 7} className="text-center py-20 text-secondary">
                     No items match your search "{search}".
                   </td>
                 </tr>
@@ -1121,6 +1553,9 @@ export function StageConfigForm({
                       <td></td>
                     </>
                   )}
+                  <td className="text-center" style={{ padding: '1rem', color: 'var(--accent-success)' }}>
+                    €{totalProfit.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </td>
                   <td className="text-center" style={{ padding: '1rem', fontSize: '1.1rem' }}>€{totalValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
               </tfoot>

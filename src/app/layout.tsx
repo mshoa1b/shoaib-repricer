@@ -35,6 +35,7 @@ export default async function RootLayout({
           {isAuthenticated && (
             <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
               <a href="/dashboard" style={{ color: 'var(--text-secondary)' }}>Dashboard</a>
+              <a href="/dashboard/combine-branches" style={{ color: 'var(--text-secondary)' }}>Combine Branches</a>
               <LogoutButton />
             </div>
           )}
